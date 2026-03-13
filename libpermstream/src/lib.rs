@@ -107,7 +107,9 @@ pub mod predictor {
         }
 
         pub fn predict(&self, features: &Array1<f64>) -> f64 {
-            self.weights.dot(features)
+            let theta = self.weights.dot(features);
+            if theta.is_nan() { return 0.5; }
+            theta.clamp(0.0, 1.0)
         }
 
         pub fn update(&mut self, actual_entropy: f64, predicted: f64, features: &Array1<f64>) {
@@ -133,8 +135,12 @@ pub mod crypto {
     }
 
     pub fn chunk_state(seed: u32, file_id: u32, chunk_index: u32) -> u32 {
-        let value = seed ^ file_id.wrapping_mul(0x9E3779B1) ^ chunk_index;
-        xorshift32(value)
+        let mut state = (seed as u64) ^ ((file_id as u64) << 32) ^ (chunk_index as u64);
+        // Fast 64-bit avalanche mixer (SplitMix-style)
+        state = (state ^ (state >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        state = (state ^ (state >> 27)).wrapping_mul(0x94d049bb133111eb);
+        state = state ^ (state >> 31);
+        state as u32
     }
 
     pub fn braid_permutation(n: usize, state: u32, theta: f64) -> (Vec<usize>, u32) {
@@ -714,6 +720,8 @@ pub mod psfs {
     pub const PSFS_FILE_SIZE: usize = 56;
     pub const PSFS_CHUNK_SIZE: usize = 48;
     pub const PSFS_MANIFEST_SIZE: usize = 40;
+    pub const MAX_STRING_TABLE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+    pub const MAX_CHUNK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
 
     pub const PSFS_HASH_NONE: u8 = 0;
     pub const PSFS_HASH_CRC32: u8 = 1;
@@ -1198,9 +1206,17 @@ pub mod psfs {
         if &sb.magic != PSFS_MAGIC { anyhow::bail!("Invalid magic"); }
 
         if (sb.flags & PSFS_FLAG_HAS_MANIFEST) != 0 {
+            let manifest_size = (sb.manifest_offset - sb.index_offset) as usize;
+            // Prevent DoS via unbounded manifest size
+            if manifest_size > MAX_STRING_TABLE_SIZE * 2 {
+                anyhow::bail!("Manifest size exceeds limit");
+            }
             file.seek(SeekFrom::Start(sb.index_offset))?;
-            let mut buf = vec![0u8; (sb.manifest_offset - sb.index_offset) as usize];
-            file.read_exact(&mut buf)?;
+            let mut buf = Vec::new();
+            file.try_clone()?.take(manifest_size as u64).read_to_end(&mut buf)?;
+            if buf.len() != manifest_size {
+                anyhow::bail!("Failed to read full manifest");
+            }
             let mut hasher = Sha256::new();
             hasher.update(&buf);
             let computed_hash = hasher.finalize();
@@ -1234,8 +1250,14 @@ pub mod psfs {
 
             let pos = file.stream_position()?;
             file.seek(SeekFrom::Start(ce.data_offset))?;
-            let mut payload = vec![0u8; ce.stored_size as usize];
-            file.read_exact(&mut payload)?;
+            if ce.stored_size as usize > MAX_CHUNK_SIZE {
+                anyhow::bail!("Chunk size exceeds limit");
+            }
+            let mut payload = Vec::new();
+            file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
+            if payload.len() != ce.stored_size as usize {
+                anyhow::bail!("Failed to read full chunk payload");
+            }
             file.seek(SeekFrom::Start(pos))?;
 
             let chunk_index = *chunk_indices.get(&ce.file_id).unwrap_or(&0u32);
@@ -1276,6 +1298,9 @@ pub mod psfs {
         }
 
         let enc_len = reader.read_u32::<BigEndian>()? as usize;
+        if enc_len > super::psfs::MAX_CHUNK_SIZE {
+            anyhow::bail!("Encoded length exceeds chunk size limit");
+        }
         let mut encoded = vec![0u8; enc_len];
         reader.read_exact(&mut encoded)?;
 
@@ -1309,8 +1334,12 @@ pub mod psfs {
         }
 
         file.seek(SeekFrom::Start(sb.strings_offset))?;
-        let mut string_table = vec![0u8; (sb.chunk_table_offset - sb.strings_offset) as usize];
-        file.read_exact(&mut string_table)?;
+        let string_table_size = (sb.chunk_table_offset - sb.strings_offset) as usize;
+        if string_table_size > MAX_STRING_TABLE_SIZE {
+            anyhow::bail!("String table exceeds size limit");
+        }
+        let mut string_table = Vec::new();
+        file.try_clone()?.take(string_table_size as u64).read_to_end(&mut string_table)?;
 
         file.seek(SeekFrom::Start(sb.chunk_table_offset))?;
         let mut chunk_entries = Vec::new();
@@ -1323,7 +1352,18 @@ pub mod psfs {
         for fe in file_entries {
             let path_bytes = &string_table[fe.path_offset as usize .. (fe.path_offset + fe.path_len) as usize];
             let rel_path = std::str::from_utf8(path_bytes)?;
-            let out_path = output_dir.join(rel_path);
+            
+            // SECURITY FIX: Zip-Slip protection
+            let mut safe_path = PathBuf::new();
+            for component in std::path::Path::new(rel_path).components() {
+                if let std::path::Component::Normal(c) = component {
+                    safe_path.push(c);
+                }
+            }
+            if safe_path.as_os_str().is_empty() {
+                continue; // Skip invalid empty paths
+            }
+            let out_path = output_dir.join(safe_path);
 
             if (fe.flags & PSFS_FILE_FLAG_DIR) != 0 {
                 fs::create_dir_all(&out_path)?;
@@ -1336,8 +1376,11 @@ pub mod psfs {
                 let mut data = Vec::new();
                 for (chunk_idx, ce) in chunk_entries[fe.chunk_start as usize .. (fe.chunk_start + fe.chunk_count) as usize].iter().enumerate() {
                     file.seek(SeekFrom::Start(ce.data_offset))?;
-                    let mut payload = vec![0u8; ce.stored_size as usize];
-                    file.read_exact(&mut payload)?;
+                    if ce.stored_size as usize > MAX_CHUNK_SIZE {
+                        anyhow::bail!("Chunk size exceeds limit");
+                    }
+                    let mut payload = Vec::new();
+                    file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
                     let decoded = decompress_chunk_payload(&payload, ce.raw_size as usize, &config, fe.file_id, chunk_idx as u32, ce.codec_id, ce.transform_id)?;
                     data.extend_from_slice(&decoded);
                 }
@@ -1349,8 +1392,11 @@ pub mod psfs {
             let mut out_file = fs::File::create(&out_path)?;
             for (chunk_idx, ce) in chunk_entries[fe.chunk_start as usize .. (fe.chunk_start + fe.chunk_count) as usize].iter().enumerate() {
                 file.seek(SeekFrom::Start(ce.data_offset))?;
-                let mut payload = vec![0u8; ce.stored_size as usize];
-                file.read_exact(&mut payload)?;
+                if ce.stored_size as usize > MAX_CHUNK_SIZE {
+                    anyhow::bail!("Chunk size exceeds limit");
+                }
+                let mut payload = Vec::new();
+                file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
                 let decoded = decompress_chunk_payload(&payload, ce.raw_size as usize, &config, fe.file_id, chunk_idx as u32, ce.codec_id, ce.transform_id)?;
                 if verify_flag && (ce.flags & PSFS_CHUNK_FLAG_CRC as u32) != 0 {
                     let crc = crc32fast::hash(&decoded);

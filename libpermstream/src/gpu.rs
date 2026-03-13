@@ -10,7 +10,7 @@ const SHADER_CODE: &str = r#"
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     if (idx < arrayLength(&input_data)) {
-        let target_idx = indices[idx];
+        let target_idx = min(indices[idx], arrayLength(&output_data) - 1u);
         output_data[target_idx] = input_data[idx];
     }
 }
@@ -191,13 +191,17 @@ impl GpuContext {
 
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = futures_channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
 
         self.device.poll(wgpu::Maintain::Wait);
 
         block_on(async {
-            receiver.await.unwrap().unwrap();
-        });
+            receiver.await
+                .map_err(|_| anyhow::anyhow!("Channel dropped before GPU map result"))?
+                .map_err(|e| anyhow::anyhow!("GPU buffer map failed: {}", e))
+        })?;
 
         let mapped_data = buffer_slice.get_mapped_range();
         let result: Vec<u32> = bytemuck::cast_slice(&mapped_data).to_vec();

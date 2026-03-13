@@ -88,10 +88,6 @@ mod licensing {
 
     pub fn validate_license(key: &str) -> Result<()> {
         let public_key = b"-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----";
-        if key == "ENT-NUCLEUS-2026" {
-            println!("License validated: Enterprise Tier");
-            return Ok(());
-        }
         
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&["permstream-nucleus"]);
@@ -197,8 +193,12 @@ mod mcp_server {
             }
 
             file.seek(std::io::SeekFrom::Start(sb.strings_offset))?;
-            let mut string_table = vec![0u8; (sb.chunk_table_offset - sb.strings_offset) as usize];
-            file.read_exact(&mut string_table)?;
+            let string_table_size = (sb.chunk_table_offset - sb.strings_offset) as usize;
+            if string_table_size > psfs::MAX_STRING_TABLE_SIZE {
+                anyhow::bail!("String table exceeds size limit");
+            }
+            let mut string_table = Vec::new();
+            file.try_clone()?.take(string_table_size as u64).read_to_end(&mut string_table)?;
 
             let mut files = Vec::new();
             for fe in file_entries {
@@ -342,8 +342,11 @@ mod data_node {
             let ce = psfs::ChunkEntry::read(&mut file)?;
 
             file.seek(std::io::SeekFrom::Start(ce.data_offset))?;
-            let mut payload = vec![0u8; ce.stored_size as usize];
-            file.read_exact(&mut payload)?;
+            if ce.stored_size as usize > psfs::MAX_CHUNK_SIZE {
+                anyhow::bail!("Chunk size exceeds limit");
+            }
+            let mut payload = Vec::new();
+            file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
 
             let config = CodecConfig {
                 chunk_size: sb.chunk_size as usize,
@@ -371,8 +374,12 @@ mod data_node {
             }
 
             file.seek(std::io::SeekFrom::Start(sb.strings_offset))?;
-            let mut string_table = vec![0u8; (sb.chunk_table_offset - sb.strings_offset) as usize];
-            file.read_exact(&mut string_table)?;
+            let string_table_size = (sb.chunk_table_offset - sb.strings_offset) as usize;
+            if string_table_size > psfs::MAX_STRING_TABLE_SIZE {
+                anyhow::bail!("String table exceeds size limit");
+            }
+            let mut string_table = Vec::new();
+            file.try_clone()?.take(string_table_size as u64).read_to_end(&mut string_table)?;
 
             let mut results = Vec::new();
             for fe in file_entries {
@@ -414,8 +421,11 @@ mod data_node {
             }
 
             file.seek(std::io::SeekFrom::Start(ce.data_offset))?;
-            let mut payload = vec![0u8; ce.stored_size as usize];
-            file.read_exact(&mut payload)?;
+            if ce.stored_size as usize > psfs::MAX_CHUNK_SIZE {
+                anyhow::bail!("Chunk size exceeds limit");
+            }
+            let mut payload = Vec::new();
+            file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
 
             let config = CodecConfig {
                 chunk_size: sb.chunk_size as usize,
