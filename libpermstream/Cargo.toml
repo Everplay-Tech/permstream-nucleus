@@ -1,0 +1,29 @@
+[package]
+name = "libpermstream"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
+anyhow = "1.0"
+crc32fast = "1.3"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ndarray = "0.15" # For matching NumPy behavior in predictor/transforms if needed
+rand = "0.8"
+rand_chacha = "0.3"
+bitvec = "1.0"
+byteorder = "1.4"
+walkdir = "2.3"
+
+# Phase 3: GPU Compute
+wgpu = "0.20"
+bytemuck = { version = "1.15", features = ["derive"] }
+pollster = "0.3"
+futures-channel = "0.3"
+
+# Phase 3: RAG / Vector Generation
+tract-onnx = "0.21"
+tokenizers = "0.19"

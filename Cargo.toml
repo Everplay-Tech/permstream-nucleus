@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "libpermstream",
+    "psfsd",
+]
+resolver = "2"

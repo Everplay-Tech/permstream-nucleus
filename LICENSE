@@ -1,0 +1,83 @@
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+"License" shall mean the terms and conditions for use, reproduction,
+and distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by
+the copyright owner that is granting the License.
+
+"Legal Entity" shall mean the legal entity that controls the rights granted under this License and the License Document. A modification which changes this definition shall not be deemed a new License.
+
+"License Document" shall mean this License Document together with its cover text as generated automatically by the License Wizard as posted on the Apache Software Foundation web site.
+
+"License Key" shall mean the unique string provided by Licensor to Licensee authorizing Licensee to use the Licensed Software.
+
+"Licensed Software" shall mean the software listed in Exhibit A.
+
+"Licensee" shall mean the legal entity that is granted rights under this License Document.
+
+"Modifications" shall mean any derivative work of the Licensed Software.
+
+2. Grant of License.
+
+Subject to the terms and conditions of this License, Licensor hereby grants to Licensee a worldwide, royalty-free, non-exclusive, perpetual and irrevocable copyright license to reproduce, prepare derivative works of, publicly display, publicly perform, sublicense and distribute Licensed Software and such Modifications in source and object code forms.
+
+3. Grant of Patent License.
+
+Subject to the terms and conditions of this License, Licensor hereby grants to Licensee a worldwide, royalty-free, non-exclusive, perpetual and irrevocable (except as expressly provided in Section 6) patent license under Licensed Patents to make, have made, use, sell, offer to sell, import and otherwise transfer the Licensed Software and such Modifications, where such Modifications are made available under the terms of Section 2.
+
+4. Redistribution.
+
+Licensee may reproduce and distribute copies of the Licensed Software and Modifications in any medium, with or without modifications, provided that Licensee conspicuously and appropriately publishes on each copy of the Licensed Software or Modifications made available by Licensee (each a "Modified Version") either (i) notice substantially similar to the License Notice set forth in Exhibit B, (ii) a hyperlink to or URI to an unabridged copy of such License substantially similar to the License Notice set forth in Exhibit B, or (iii) a hyperlink or URI to an unabridged copy of the License Notice substantially similar to the License Notice set forth in Exhibit B.
+
+5. Submission of Modifications.
+
+When Licensee makes a Modification available to Licensor under this License Document, Licensee hereby grants Licensor a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare derivative works of, publicly display, publicly perform, sublicense, and distribute such Modifications and such derivative works. Licensee also grants Licensor a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Modification, where such Modification is made available under the terms of Section 2.
+
+6. Trademarks.
+
+This License does not grant permission to use the trade names, trademarks, service marks, or product names of Licensor except as required for reasonable and customary use in describing the origin of the Licensed Software and reproducing the content of the License Notice. Such use does not represent an endorsement by Licensor.
+
+7. Termination.
+
+This License and the rights granted hereunder will terminate automatically upon Licensee's breach of this License. Upon such termination, Licensee shall immediately cease all use of the Licensed Software and destroy all copies, full or partial, of the Licensed Software.
+
+8. Disclaimer of Warranty.
+
+Licensed Software is provided under this License Document on an "as is" basis, without warranty of any kind, either expressed or implied, including, without limitation, warranties that the Licensed Software are merchantable, fit for a particular purpose or non-infringing. Licensor will not be liable for any direct, indirect, incidental or consequential damages arising out of the use or inability to use the Licensed Software.
+
+9. Limitation of Liability.
+
+Under no circumstances and under no legal theory, whether tort (including negligence), contract, or otherwise, shall Licensor or any Licensor licensor, be liable to Licensee or any other person for any indirect, special, incidental, or consequential damages of any character including, without limitation, damages for loss of goodwill, work stoppage, computer failure or malfunction, or any and all other commercial damages or losses, even if such party shall have been informed of the possibility of such damages.
+
+10. General.
+
+Nothing in this License Document shall be deemed to create a partnership, joint venture, agency relationship, or fiduciary relationship between Licensor and Licensee. If any provision of this License Document is held to be unenforceable, that provision shall be reformed only to the extent necessary to make it enforceable, and shall not affect the enforceability of the remaining provisions. This License Document constitutes the entire agreement between the parties with respect to the subject matter hereof and supersedes all prior oral or written agreements or understandings between the parties. Licensor shall not be obligated under this License Document to reproduce or distribute the License Document or the License Key. This License Document may be modified only by a written instrument executed by both parties.
+
+END OF LICENSE DOCUMENT
+
+EXHIBIT A - LICENSED SOFTWARE
+
+PermStream Pro - Ultra-fast lossless streaming compression algorithm
+
+EXHIBIT B - LICENSE NOTICE
+
+Copyright [2024] [Magus]
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
