@@ -722,6 +722,8 @@ pub mod psfs {
     pub const PSFS_MANIFEST_SIZE: usize = 40;
     pub const MAX_STRING_TABLE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
     pub const MAX_CHUNK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+    pub const MAX_RAW_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+    pub const MAX_FILE_COUNT: u32 = 1_000_000; // Limit to 1 million files per container
 
     pub const PSFS_HASH_NONE: u8 = 0;
     pub const PSFS_HASH_CRC32: u8 = 1;
@@ -1274,6 +1276,9 @@ pub mod psfs {
     }
 
     pub fn decompress_chunk_payload(payload: &[u8], raw_size: usize, config: &CodecConfig, file_id: u32, chunk_index: u32, codec_id: u8, transform_id: u8) -> anyhow::Result<Vec<u8>> {
+        if raw_size > MAX_RAW_SIZE {
+            anyhow::bail!("Chunk raw size exceeds maximum limit");
+        }
         if codec_id == PSFS_CODEC_RAW {
             return Ok(payload.to_vec());
         }
@@ -1327,6 +1332,9 @@ pub mod psfs {
             ..Default::default()
         };
 
+        if sb.file_count > MAX_FILE_COUNT {
+            anyhow::bail!("File count exceeds maximum limit");
+        }
         file.seek(SeekFrom::Start(sb.index_offset))?;
         let mut file_entries = Vec::new();
         for _ in 0..sb.file_count {
@@ -1385,6 +1393,10 @@ pub mod psfs {
                     data.extend_from_slice(&decoded);
                 }
                 let target = std::str::from_utf8(&data)?;
+                let target_path = Path::new(target);
+                if target_path.is_absolute() || target_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                    anyhow::bail!("Invalid symlink target: {}", target);
+                }
                 std::os::unix::fs::symlink(target, &out_path)?;
                 continue;
             }

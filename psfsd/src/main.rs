@@ -1,8 +1,31 @@
 use clap::{Parser, Subcommand};
 use libpermstream::{CodecConfig, PredictorMode, psfs, rag};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use std::io::Read;
+
+/// Validates that the requested container_path is safely contained within DATA_ROOT
+fn resolve_safe_path(client_path: &str) -> Result<PathBuf> {
+    let data_root = std::env::var("PSFS_DATA_ROOT").unwrap_or_else(|_| ".".to_string());
+    let base = Path::new(&data_root).canonicalize().unwrap_or_else(|_| PathBuf::from(&data_root));
+    
+    let requested = Path::new(client_path);
+    if requested.is_absolute() || requested.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        anyhow::bail!("Path traversals and absolute paths are forbidden.");
+    }
+    
+    let mut full_path = base.clone();
+    for comp in requested.components() {
+        if let std::path::Component::Normal(c) = comp {
+            full_path.push(c);
+        }
+    }
+    
+    if !full_path.starts_with(&base) {
+        anyhow::bail!("Access denied: Path escapes DATA_ROOT.");
+    }
+    Ok(full_path)
+}
 
 #[derive(Parser)]
 #[command(name = "psfsd")]
@@ -167,18 +190,23 @@ mod mcp_server {
     #[tool(tool_box)]
     impl PsfsMcpServer {
         #[tool(description = "List all files in a PSFS container")]
-        async fn list_files(&self, #[tool(aggr)] params: ListFilesParams) -> String {
-            let container = PathBuf::from(&params.container_path);
-            match self.get_file_list(&container) {
-                Ok(files) => {
-                    let mut result = format!("Contents of {}:\n", container.display());
-                    for f in files {
-                        result.push_str(&format!("- {}\n", f));
+        async fn list_files(&self, #[tool(aggr)] params: ListFilesParams) -> Result<String, String> {
+            let container = resolve_safe_path(&params.container_path)
+                .map_err(|e| e.to_string())?;
+            let server = self.clone();
+            
+            tokio::task::spawn_blocking(move || {
+                match server.get_file_list(&container) {
+                    Ok(files) => {
+                        let mut result = format!("Contents of {}:\n", container.display());
+                        for f in files {
+                            result.push_str(&format!("- {}\n", f));
+                        }
+                        Ok(result)
                     }
-                    result
+                    Err(e) => Ok(format!("Error reading container: {}", e)),
                 }
-                Err(e) => format!("Error reading container: {}", e),
-            }
+            }).await.unwrap_or_else(|e| Ok(format!("Executor error: {}", e)))
         }
 
         fn get_file_list(&self, path: &PathBuf) -> Result<Vec<String>> {
@@ -186,6 +214,10 @@ mod mcp_server {
             let mut file = std::fs::File::open(path)?;
             let sb = psfs::Superblock::read(&mut file)?;
             
+            if sb.file_count > psfs::MAX_FILE_COUNT {
+                anyhow::bail!("File count exceeds maximum limit");
+            }
+
             file.seek(std::io::SeekFrom::Start(sb.index_offset))?;
             let mut file_entries = Vec::new();
             for _ in 0..sb.file_count {
@@ -211,26 +243,34 @@ mod mcp_server {
         }
 
         #[tool(description = "Extract a specific file from a PSFS container")]
-        async fn extract_file(&self, #[tool(aggr)] params: ExtractFileParams) -> String {
-            format!("Extracted {} from {}", params.file_path, params.container_path)
+        async fn extract_file(&self, #[tool(aggr)] params: ExtractFileParams) -> Result<String, String> {
+            let container = resolve_safe_path(&params.container_path)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("Extracted {} from {}", params.file_path, container.display()))
         }
 
         #[tool(description = "Semantic search for files in a PSFS container")]
-        async fn semantic_search(&self, #[tool(aggr)] params: SearchParams) -> String {
-            let container = PathBuf::from(&params.container_path);
-            match self.do_semantic_search(&container, &params.query) {
-                Ok(results) => {
-                    if results.is_empty() {
-                        return "No relevant files found.".to_string();
+        async fn semantic_search(&self, #[tool(aggr)] params: SearchParams) -> Result<String, String> {
+            let container = resolve_safe_path(&params.container_path)
+                .map_err(|e| e.to_string())?;
+            let server = self.clone();
+            let query = params.query.clone();
+
+            tokio::task::spawn_blocking(move || {
+                match server.do_semantic_search(&container, &query) {
+                    Ok(results) => {
+                        if results.is_empty() {
+                            return Ok("No relevant files found.".to_string());
+                        }
+                        let mut output = "Top semantic matches:\n".to_string();
+                        for (path, score) in results {
+                            output.push_str(&format!("- {} (score: {:.4})\n", path, score));
+                        }
+                        Ok(output)
                     }
-                    let mut output = "Top semantic matches:\n".to_string();
-                    for (path, score) in results {
-                        output.push_str(&format!("- {} (score: {:.4})\n", path, score));
-                    }
-                    output
+                    Err(e) => Ok(format!("Search error: {}", e)),
                 }
-                Err(e) => format!("Search error: {}", e),
-            }
+            }).await.unwrap_or_else(|e| Ok(format!("Executor error: {}", e)))
         }
 
         fn do_semantic_search(&self, path: &PathBuf, query: &str) -> Result<Vec<(String, f32)>> {
@@ -467,9 +507,15 @@ mod data_node {
     impl PermStreamDataNode for PsfsDataNode {
         async fn get_chunk(&self, request: Request<ChunkRequest>) -> Result<Response<ChunkResponse>, Status> {
             let req = request.into_inner();
-            let container_path = PathBuf::from(req.container_path);
+            let container_path = resolve_safe_path(&req.container_path)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let node = self.clone();
             
-            match self.read_chunk(&container_path, req.file_id, req.chunk_index) {
+            let result = tokio::task::spawn_blocking(move || {
+                node.read_chunk(&container_path, req.file_id, req.chunk_index)
+            }).await.map_err(|e| Status::internal(format!("Executor error: {}", e)))?;
+
+            match result {
                 Ok(data) => Ok(Response::new(ChunkResponse { data })),
                 Err(e) => Err(Status::internal(format!("Failed to read chunk: {}", e))),
             }
@@ -479,16 +525,17 @@ mod data_node {
 
         async fn stream_tensors(&self, request: Request<TensorRequest>) -> Result<Response<Self::StreamTensorsStream>, Status> {
             let req = request.into_inner();
-            let container_path = PathBuf::from(req.container_path);
+            let container_path = resolve_safe_path(&req.container_path)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
             let (tx, rx) = tokio::sync::mpsc::channel(4);
 
             let node = self.clone();
             
-            tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
                 let file_ids = match node.get_file_ids(&container_path, &req.file_paths) {
                     Ok(ids) => ids,
                     Err(e) => {
-                        let _ = tx.send(Err(Status::internal(format!("Failed to get file IDs: {}", e)))).await;
+                        let _ = tx.blocking_send(Err(Status::internal(format!("Failed to get file IDs: {}", e))));
                         return;
                     }
                 };
@@ -497,7 +544,7 @@ mod data_node {
                     let chunk_count = match node.get_chunk_count(&container_path, file_id) {
                         Ok(count) => count,
                         Err(e) => {
-                            let _ = tx.send(Err(Status::internal(format!("Failed to get chunk count for {}: {}", path, e)))).await;
+                            let _ = tx.blocking_send(Err(Status::internal(format!("Failed to get chunk count for {}: {}", path, e))));
                             continue;
                         }
                     };
@@ -529,12 +576,12 @@ mod data_node {
                                     shape: vec![-1],
                                     dtype: "uint8".to_string(),
                                 };
-                                if tx.send(Ok(response)).await.is_err() {
+                                if tx.blocking_send(Ok(response)).is_err() {
                                     return;
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(Err(Status::internal(format!("Failed to read chunk {} of {}: {}", i, path, e)))).await;
+                                let _ = tx.blocking_send(Err(Status::internal(format!("Failed to read chunk {} of {}: {}", i, path, e))));
                                 return;
                             }
                         }
