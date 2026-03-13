@@ -225,7 +225,7 @@ mod mcp_server {
             }
 
             file.seek(std::io::SeekFrom::Start(sb.strings_offset))?;
-            let string_table_size = (sb.chunk_table_offset - sb.strings_offset) as usize;
+            let string_table_size = sb.chunk_table_offset.checked_sub(sb.strings_offset).ok_or_else(|| anyhow::anyhow!("Invalid offset"))? as usize;
             if string_table_size > psfs::MAX_STRING_TABLE_SIZE {
                 anyhow::bail!("String table exceeds size limit");
             }
@@ -234,7 +234,11 @@ mod mcp_server {
 
             let mut files = Vec::new();
             for fe in file_entries {
-                let path_bytes = &string_table[fe.path_offset as usize .. (fe.path_offset + fe.path_len) as usize];
+                let path_end = fe.path_offset.checked_add(fe.path_len).ok_or_else(|| anyhow::anyhow!("Path offset overflow"))? as usize;
+                if path_end > string_table.len() {
+                    anyhow::bail!("Path bounds exceed string table length: offset={}, len={}, end={}, table_len={}", fe.path_offset, fe.path_len, path_end, string_table.len());
+                }
+                let path_bytes = &string_table[fe.path_offset as usize .. path_end];
                 if let Ok(rel_path) = std::str::from_utf8(path_bytes) {
                     files.push(rel_path.to_string());
                 }
@@ -365,28 +369,36 @@ mod data_node {
     }
 
     impl PsfsDataNode {
-        fn read_chunk(&self, path: &PathBuf, file_id: u32, chunk_index: u32) -> Result<Vec<u8>> {
-            use std::io::Seek;
-            let mut file = std::fs::File::open(path)?;
-            let sb = psfs::Superblock::read(&mut file)?;
+        async fn read_chunk(&self, path: &PathBuf, file_id: u32, chunk_index: u32) -> Result<Vec<u8>> {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            use std::io::SeekFrom;
+            let mut file = tokio::fs::File::open(path).await?;
             
-            file.seek(std::io::SeekFrom::Start(sb.index_offset + (file_id as u64 * psfs::PSFS_FILE_SIZE as u64)))?;
-            let fe = psfs::FileEntry::read(&mut file)?;
+            let mut sb_buf = [0u8; psfs::PSFS_SUPER_SIZE];
+            file.read_exact(&mut sb_buf).await?;
+            let sb = psfs::Superblock::read(&mut std::io::Cursor::new(sb_buf))?;
+            
+            file.seek(SeekFrom::Start(sb.index_offset + (file_id as u64 * psfs::PSFS_FILE_SIZE as u64))).await?;
+            let mut fe_buf = [0u8; psfs::PSFS_FILE_SIZE];
+            file.read_exact(&mut fe_buf).await?;
+            let fe = psfs::FileEntry::read(&mut std::io::Cursor::new(fe_buf))?;
             
             if chunk_index >= fe.chunk_count {
                 anyhow::bail!("Chunk index out of bounds");
             }
 
             let chunk_id = fe.chunk_start + chunk_index;
-            file.seek(std::io::SeekFrom::Start(sb.chunk_table_offset + (chunk_id as u64 * psfs::PSFS_CHUNK_SIZE as u64)))?;
-            let ce = psfs::ChunkEntry::read(&mut file)?;
+            file.seek(SeekFrom::Start(sb.chunk_table_offset + (chunk_id as u64 * psfs::PSFS_CHUNK_SIZE as u64))).await?;
+            let mut ce_buf = [0u8; psfs::PSFS_CHUNK_SIZE];
+            file.read_exact(&mut ce_buf).await?;
+            let ce = psfs::ChunkEntry::read(&mut std::io::Cursor::new(ce_buf))?;
 
-            file.seek(std::io::SeekFrom::Start(ce.data_offset))?;
+            file.seek(SeekFrom::Start(ce.data_offset)).await?;
             if ce.stored_size as usize > psfs::MAX_CHUNK_SIZE {
                 anyhow::bail!("Chunk size exceeds limit");
             }
-            let mut payload = Vec::new();
-            file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
+            let mut payload = vec![0u8; ce.stored_size as usize];
+            file.read_exact(&mut payload).await?;
 
             let config = CodecConfig {
                 chunk_size: sb.chunk_size as usize,
@@ -398,32 +410,49 @@ mod data_node {
                 ..Default::default()
             };
 
-            let decoded = psfs::decompress_chunk_payload(&payload, ce.raw_size as usize, &config, file_id, chunk_index, ce.codec_id, ce.transform_id)?;
-            Ok(decoded)
+            // CPU decompression is synchronous and heavy, we offload it to the blocking pool
+            tokio::task::spawn_blocking(move || {
+                let decoded = psfs::decompress_chunk_payload(&payload, ce.raw_size as usize, &config, file_id, chunk_index, ce.codec_id, ce.transform_id)?;
+                if (ce.flags & psfs::PSFS_CHUNK_FLAG_CRC as u32) != 0 {
+                    let crc = crc32fast::hash(&decoded);
+                    if crc != ce.crc32 { anyhow::bail!("CRC mismatch for chunk"); }
+                }
+                Ok(decoded)
+            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Executor error: {}", e)))
         }
 
-        fn get_file_ids(&self, container: &PathBuf, requested_paths: &[String]) -> Result<Vec<(String, u32)>> {
-            use std::io::Seek;
-            let mut file = std::fs::File::open(container)?;
-            let sb = psfs::Superblock::read(&mut file)?;
+        async fn get_file_ids(&self, container: &PathBuf, requested_paths: &[String]) -> Result<Vec<(String, u32)>> {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            use std::io::SeekFrom;
+            let mut file = tokio::fs::File::open(container).await?;
             
-            file.seek(std::io::SeekFrom::Start(sb.index_offset))?;
+            let mut sb_buf = [0u8; psfs::PSFS_SUPER_SIZE];
+            file.read_exact(&mut sb_buf).await?;
+            let sb = psfs::Superblock::read(&mut std::io::Cursor::new(sb_buf))?;
+            
+            file.seek(SeekFrom::Start(sb.index_offset)).await?;
             let mut file_entries = Vec::new();
             for _ in 0..sb.file_count {
-                file_entries.push(psfs::FileEntry::read(&mut file)?);
+                let mut fe_buf = [0u8; psfs::PSFS_FILE_SIZE];
+                file.read_exact(&mut fe_buf).await?;
+                file_entries.push(psfs::FileEntry::read(&mut std::io::Cursor::new(fe_buf))?);
             }
 
-            file.seek(std::io::SeekFrom::Start(sb.strings_offset))?;
-            let string_table_size = (sb.chunk_table_offset - sb.strings_offset) as usize;
+            file.seek(SeekFrom::Start(sb.strings_offset)).await?;
+            let string_table_size = sb.chunk_table_offset.checked_sub(sb.strings_offset).ok_or_else(|| anyhow::anyhow!("Invalid offset"))? as usize;
             if string_table_size > psfs::MAX_STRING_TABLE_SIZE {
                 anyhow::bail!("String table exceeds size limit");
             }
-            let mut string_table = Vec::new();
-            file.try_clone()?.take(string_table_size as u64).read_to_end(&mut string_table)?;
+            let mut string_table = vec![0u8; string_table_size];
+            file.read_exact(&mut string_table).await?;
 
             let mut results = Vec::new();
             for fe in file_entries {
-                let path_bytes = &string_table[fe.path_offset as usize .. (fe.path_offset + fe.path_len) as usize];
+                let path_end = fe.path_offset.checked_add(fe.path_len).ok_or_else(|| anyhow::anyhow!("Path offset overflow"))? as usize;
+                if path_end > string_table.len() {
+                    anyhow::bail!("Path bounds exceed string table length: offset={}, len={}, end={}, table_len={}", fe.path_offset, fe.path_len, path_end, string_table.len());
+                }
+                let path_bytes = &string_table[fe.path_offset as usize .. path_end];
                 if let Ok(rel_path) = std::str::from_utf8(path_bytes) {
                     if requested_paths.contains(&rel_path.to_string()) {
                         results.push((rel_path.to_string(), fe.file_id));
@@ -433,39 +462,52 @@ mod data_node {
             Ok(results)
         }
 
-        fn get_chunk_count(&self, container: &PathBuf, file_id: u32) -> Result<u32> {
-            use std::io::Seek;
-            let mut file = std::fs::File::open(container)?;
-            let sb = psfs::Superblock::read(&mut file)?;
+        async fn get_chunk_count(&self, container: &PathBuf, file_id: u32) -> Result<u32> {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            use std::io::SeekFrom;
+            let mut file = tokio::fs::File::open(container).await?;
+            let mut sb_buf = [0u8; psfs::PSFS_SUPER_SIZE];
+            file.read_exact(&mut sb_buf).await?;
+            let sb = psfs::Superblock::read(&mut std::io::Cursor::new(sb_buf))?;
             
-            file.seek(std::io::SeekFrom::Start(sb.index_offset + (file_id as u64 * psfs::PSFS_FILE_SIZE as u64)))?;
-            let fe = psfs::FileEntry::read(&mut file)?;
+            file.seek(SeekFrom::Start(sb.index_offset + (file_id as u64 * psfs::PSFS_FILE_SIZE as u64))).await?;
+            let mut fe_buf = [0u8; psfs::PSFS_FILE_SIZE];
+            file.read_exact(&mut fe_buf).await?;
+            let fe = psfs::FileEntry::read(&mut std::io::Cursor::new(fe_buf))?;
             Ok(fe.chunk_count)
         }
 
-        fn read_chunk_for_gpu(&self, path: &PathBuf, file_id: u32, chunk_index: u32) -> Result<(Vec<u8>, u32, f64, usize, CodecConfig)> {
-            use std::io::Seek;
+        async fn read_chunk_for_gpu(&self, path: &PathBuf, file_id: u32, chunk_index: u32) -> Result<(Vec<u8>, u32, f64, usize, CodecConfig, psfs::ChunkEntry)> {
             use byteorder::{BigEndian, ReadBytesExt};
-            let mut file = std::fs::File::open(path)?;
-            let sb = psfs::Superblock::read(&mut file)?;
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            use std::io::SeekFrom;
+            let mut file = tokio::fs::File::open(path).await?;
             
-            file.seek(std::io::SeekFrom::Start(sb.index_offset + (file_id as u64 * psfs::PSFS_FILE_SIZE as u64)))?;
-            let fe = psfs::FileEntry::read(&mut file)?;
+            let mut sb_buf = [0u8; psfs::PSFS_SUPER_SIZE];
+            file.read_exact(&mut sb_buf).await?;
+            let sb = psfs::Superblock::read(&mut std::io::Cursor::new(sb_buf))?;
+            
+            file.seek(SeekFrom::Start(sb.index_offset + (file_id as u64 * psfs::PSFS_FILE_SIZE as u64))).await?;
+            let mut fe_buf = [0u8; psfs::PSFS_FILE_SIZE];
+            file.read_exact(&mut fe_buf).await?;
+            let fe = psfs::FileEntry::read(&mut std::io::Cursor::new(fe_buf))?;
             
             let chunk_id = fe.chunk_start + chunk_index;
-            file.seek(std::io::SeekFrom::Start(sb.chunk_table_offset + (chunk_id as u64 * psfs::PSFS_CHUNK_SIZE as u64)))?;
-            let ce = psfs::ChunkEntry::read(&mut file)?;
+            file.seek(SeekFrom::Start(sb.chunk_table_offset + (chunk_id as u64 * psfs::PSFS_CHUNK_SIZE as u64))).await?;
+            let mut ce_buf = [0u8; psfs::PSFS_CHUNK_SIZE];
+            file.read_exact(&mut ce_buf).await?;
+            let ce = psfs::ChunkEntry::read(&mut std::io::Cursor::new(ce_buf))?;
 
             if ce.codec_id == psfs::PSFS_CODEC_RAW {
                 anyhow::bail!("Chunk is raw, no unpermutation needed");
             }
 
-            file.seek(std::io::SeekFrom::Start(ce.data_offset))?;
+            file.seek(SeekFrom::Start(ce.data_offset)).await?;
             if ce.stored_size as usize > psfs::MAX_CHUNK_SIZE {
                 anyhow::bail!("Chunk size exceeds limit");
             }
-            let mut payload = Vec::new();
-            file.try_clone()?.take(ce.stored_size as u64).read_to_end(&mut payload)?;
+            let mut payload = vec![0u8; ce.stored_size as usize];
+            file.read_exact(&mut payload).await?;
 
             let config = CodecConfig {
                 chunk_size: sb.chunk_size as usize,
@@ -477,29 +519,35 @@ mod data_node {
                 ..Default::default()
             };
 
-            let mut reader = std::io::Cursor::new(&payload);
-            let ent_q = reader.read_u16::<BigEndian>()?;
-            let ent_f = ent_q as f64 / 100.0;
+            // CPU math offloaded
+            tokio::task::spawn_blocking(move || {
+                let mut reader = std::io::Cursor::new(&payload);
+                let ent_q = byteorder::ReadBytesExt::read_u16::<BigEndian>(&mut reader)?;
+                let ent_f = ent_q as f64 / 100.0;
 
-            let weights = libpermstream::predictor::A3BPredictor::init_weights(&config.predictor_mode, config.seed, config.weights.clone());
-            let a3b = libpermstream::predictor::A3BPredictor::new(Some(weights), 0.01);
-            
-            let features = Array1::from_vec(vec![ent_f, 0.0, ce.raw_size as f64, 1.0]);
-            let theta = a3b.predict(&features);
-            let state = crypto::chunk_state(config.seed, file_id, chunk_index);
+                let weights = libpermstream::predictor::A3BPredictor::init_weights(&config.predictor_mode, config.seed, config.weights.clone());
+                let a3b = libpermstream::predictor::A3BPredictor::new(Some(weights), 0.01);
+                
+                let features = Array1::from_vec(vec![ent_f, 0.0, ce.raw_size as f64, 1.0]);
+                let theta = a3b.predict(&features);
+                let state = crypto::chunk_state(config.seed, file_id, chunk_index);
 
-            if config.use_rank {
-                anyhow::bail!("GPU path currently optimized for Seeded Braid mode only");
-            }
+                if config.use_rank {
+                    anyhow::bail!("GPU path currently optimized for Seeded Braid mode only");
+                }
 
-            let enc_len = reader.read_u32::<BigEndian>()? as usize;
-            let mut encoded = vec![0u8; enc_len];
-            reader.read_exact(&mut encoded)?;
+                let enc_len = byteorder::ReadBytesExt::read_u32::<BigEndian>(&mut reader)? as usize;
+                if enc_len > psfs::MAX_CHUNK_SIZE {
+                    anyhow::bail!("Encoded size exceeds limit");
+                }
+                let mut encoded = vec![0u8; enc_len];
+                std::io::Read::read_exact(&mut reader, &mut encoded)?;
 
-            let mut model = [1i64; 256];
-            let decoded = libpermstream::arithmetic::decode(&encoded, &mut model, ce.raw_size as usize, ent_f);
-            
-            Ok((decoded, state, theta, config.block_size, config))
+                let mut model = [1i64; 256];
+                let decoded = libpermstream::arithmetic::decode(&encoded, &mut model, ce.raw_size as usize, ent_f);
+                
+                Ok((decoded, state, theta, config.block_size, config, ce))
+            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Executor error: {}", e)))
         }
     }
 
@@ -509,13 +557,8 @@ mod data_node {
             let req = request.into_inner();
             let container_path = resolve_safe_path(&req.container_path)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            let node = self.clone();
             
-            let result = tokio::task::spawn_blocking(move || {
-                node.read_chunk(&container_path, req.file_id, req.chunk_index)
-            }).await.map_err(|e| Status::internal(format!("Executor error: {}", e)))?;
-
-            match result {
+            match self.read_chunk(&container_path, req.file_id, req.chunk_index).await {
                 Ok(data) => Ok(Response::new(ChunkResponse { data })),
                 Err(e) => Err(Status::internal(format!("Failed to read chunk: {}", e))),
             }
@@ -531,42 +574,50 @@ mod data_node {
 
             let node = self.clone();
             
-            tokio::task::spawn_blocking(move || {
-                let file_ids = match node.get_file_ids(&container_path, &req.file_paths) {
+            tokio::spawn(async move {
+                let file_ids = match node.get_file_ids(&container_path, &req.file_paths).await {
                     Ok(ids) => ids,
                     Err(e) => {
-                        let _ = tx.blocking_send(Err(Status::internal(format!("Failed to get file IDs: {}", e))));
+                        let _ = tx.send(Err(Status::internal(format!("Failed to get file IDs: {}", e)))).await;
                         return;
                     }
                 };
 
                 for (path, file_id) in file_ids {
-                    let chunk_count = match node.get_chunk_count(&container_path, file_id) {
+                    let chunk_count = match node.get_chunk_count(&container_path, file_id).await {
                         Ok(count) => count,
                         Err(e) => {
-                            let _ = tx.blocking_send(Err(Status::internal(format!("Failed to get chunk count for {}: {}", path, e))));
+                            let _ = tx.send(Err(Status::internal(format!("Failed to get chunk count for {}: {}", path, e)))).await;
                             continue;
                         }
                     };
 
                     for i in 0..chunk_count {
                         let decoded_data = if let Some(ref gpu_ctx) = node.gpu {
-                            match node.read_chunk_for_gpu(&container_path, file_id, i) {
-                                Ok((permuted_data, state, theta, block_size, _config)) => {
-                                    let mut output = Vec::new();
-                                    for chunk in permuted_data.chunks(block_size) {
-                                        let (perm, _) = crypto::braid_permutation(chunk.len(), state, theta);
-                                        let input_u32: Vec<u32> = chunk.iter().map(|&x| x as u32).collect();
-                                        let perm_u32: Vec<u32> = perm.iter().map(|&x| x as u32).collect();
-                                        let result_u32 = gpu_ctx.unpermute(&input_u32, &perm_u32).unwrap_or(input_u32);
-                                        output.extend(result_u32.iter().map(|&x| x as u8));
-                                    }
-                                    Ok(output)
+                            match node.read_chunk_for_gpu(&container_path, file_id, i).await {
+                                Ok((permuted_data, state, theta, block_size, _config, ce)) => {
+                                    // Run the GPU step in spawn_blocking as wgpu's poll/map is blocking
+                                    let gpu_ctx = gpu_ctx.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        let mut output = Vec::new();
+                                        for chunk in permuted_data.chunks(block_size) {
+                                            let (perm, _): (Vec<usize>, u32) = crypto::braid_permutation(chunk.len(), state, theta);
+                                            let input_u32: Vec<u32> = chunk.iter().map(|&x| x as u32).collect();
+                                            let perm_u32: Vec<u32> = perm.iter().map(|&x| x as u32).collect();
+                                            let result_u32 = gpu_ctx.unpermute(&input_u32, &perm_u32).unwrap_or(input_u32);
+                                            output.extend(result_u32.iter().map(|&x| x as u8));
+                                        }
+                                        if (ce.flags & psfs::PSFS_CHUNK_FLAG_CRC as u32) != 0 {
+                                            let crc = crc32fast::hash(&output);
+                                            if crc != ce.crc32 { return Err(anyhow::anyhow!("CRC mismatch for chunk")); }
+                                        }
+                                        Ok(output)
+                                    }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Executor error: {}", e)))
                                 }
-                                Err(_) => node.read_chunk(&container_path, file_id, i),
+                                Err(_) => node.read_chunk(&container_path, file_id, i).await,
                             }
                         } else {
-                            node.read_chunk(&container_path, file_id, i)
+                            node.read_chunk(&container_path, file_id, i).await
                         };
 
                         match decoded_data {
@@ -576,12 +627,12 @@ mod data_node {
                                     shape: vec![-1],
                                     dtype: "uint8".to_string(),
                                 };
-                                if tx.blocking_send(Ok(response)).is_err() {
+                                if tx.send(Ok(response)).await.is_err() {
                                     return;
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.blocking_send(Err(Status::internal(format!("Failed to read chunk {} of {}: {}", i, path, e))));
+                                let _ = tx.send(Err(Status::internal(format!("Failed to read chunk {} of {}: {}", i, path, e)))).await;
                                 return;
                             }
                         }

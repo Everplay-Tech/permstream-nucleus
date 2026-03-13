@@ -17,6 +17,7 @@ rand_chacha = "0.3"
 bitvec = "1.0"
 byteorder = "1.4"
 walkdir = "2.3"
+rayon = "1.8"
 
 # Phase 3: GPU Compute
 wgpu = "0.20"

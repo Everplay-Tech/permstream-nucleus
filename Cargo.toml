@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "libpermstream",
+    "libpermstream/fuzz",
     "psfsd",
 ]
 resolver = "2"

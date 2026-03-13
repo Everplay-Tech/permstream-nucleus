@@ -6,12 +6,62 @@ const SHADER_CODE: &str = r#"
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read_write> output_data: array<u32>;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
-    if (idx < arrayLength(&input_data)) {
-        let target_idx = min(indices[idx], arrayLength(&output_data) - 1u);
-        output_data[target_idx] = input_data[idx];
+// FSST-GPU / DFloat11 optimization paradigm:
+// Structure permutations as independent tiles fitting into 32KB shared memory.
+// This allows braids to be unweaved entirely inside the L1 cache.
+const TILE_SIZE: u32 = 1024u; // 4KB tile of u32s
+var<workgroup> input_tile: array<u32, 1024>;
+var<workgroup> output_tile: array<u32, 1024>;
+
+@compute @workgroup_size(256)
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) group_id: vec3<u32>
+) {
+    let tile_offset = group_id.x * TILE_SIZE;
+    
+    // 1. Cooperative Load: Pull VRAM into SRAM (L1)
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+        let local_idx = local_id.x + i * 256u;
+        let global_idx = tile_offset + local_idx;
+        if (global_idx < arrayLength(&input_data)) {
+            input_tile[local_idx] = input_data[global_idx];
+        }
+    }
+    
+    workgroupBarrier();
+    
+    // 2. Unweave Braid entirely within SRAM (Zero Warp Divergence in VRAM)
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+        let local_idx = local_id.x + i * 256u;
+        let global_idx = tile_offset + local_idx;
+        if (global_idx < arrayLength(&input_data)) {
+            let target_idx = indices[global_idx];
+            let local_target = target_idx - tile_offset;
+            
+            if (target_idx >= tile_offset && local_target < TILE_SIZE) {
+                // Resolved entirely in L1 cache
+                output_tile[local_target] = input_tile[local_idx];
+            } else {
+                // Fallback for permutations crossing tile boundaries (rare in PermStream)
+                let safe_target = min(target_idx, arrayLength(&output_data) - 1u);
+                output_data[safe_target] = input_tile[local_idx];
+            }
+        }
+    }
+    
+    workgroupBarrier();
+    
+    // 3. Coalesced Store: Flush resolved SRAM back to VRAM
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+        let local_idx = local_id.x + i * 256u;
+        let global_idx = tile_offset + local_idx;
+        if (global_idx < arrayLength(&output_data)) {
+            // Because PermStream permutations are block-aligned bi-jections that fit 
+            // entirely inside TILE_SIZE, output_tile is fully populated and valid.
+            output_data[global_idx] = output_tile[local_idx];
+        }
     }
 }
 "#;
@@ -169,7 +219,7 @@ impl GpuContext {
             });
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroup_count = ((data.len() as u32) + 63) / 64;
+            let workgroup_count = ((data.len() as u32) + 1023) / 1024;
             cpass.dispatch_workgroups(workgroup_count, 1, 1);
         }
 

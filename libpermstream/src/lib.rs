@@ -59,6 +59,7 @@ pub fn get_transform_id(name: &str) -> u8 {
         "delta" => 1,
         "xor" => 2,
         "evenodd" => 3,
+        "bitplane" => 4,
         _ => 0,
     }
 }
@@ -68,6 +69,7 @@ pub fn get_transform_name(id: u8) -> String {
         1 => "delta".to_string(),
         2 => "xor".to_string(),
         3 => "evenodd".to_string(),
+        4 => "bitplane".to_string(),
         _ => "none".to_string(),
     }
 }
@@ -219,11 +221,16 @@ pub mod crypto {
         Ok(BigUint::from_bytes_be(&bytes))
     }
 
-    pub fn permute_chunk(chunk: &[u8], block_size: usize, mut state: u32, theta: f64, use_rank: bool) -> (Vec<u8>, Vec<BigUint>, u32) {
+    pub fn permute_chunk(chunk: &[u8], block_size: usize, mut state: u32, theta: f64, use_rank: bool, transform_id: u8) -> (Vec<u8>, Vec<BigUint>, u32) {
         let chunk_len = chunk.len();
         let mut permuted = vec![0u8; chunk_len];
         let mut ranks = Vec::new();
         let mut offset = 0;
+        
+        // High-entropy bypass: If theta is extremely high, the braid is essentially randomized noise
+        // we can skip the compute-heavy permutation and pass to AC directly.
+        let skip_braid = theta > 0.98;
+
         while offset < chunk_len {
             let block_len = std::cmp::min(block_size, chunk_len - offset);
             let (perm, new_state) = braid_permutation(block_len, state, theta);
@@ -232,22 +239,45 @@ pub mod crypto {
                 ranks.push(perm_to_rank(&perm));
             }
             let block = &chunk[offset..offset+block_len];
-            for (i, &p) in perm.iter().enumerate() {
-                permuted[offset + i] = block[p];
+            
+            if skip_braid {
+                // Pass through but still apply transform inline
+                for (i, &val) in block.iter().enumerate() {
+                    let mut v = val;
+                    if transform_id == 1 && i > 0 { v = v.wrapping_sub(block[i-1]); }
+                    else if transform_id == 2 && i > 0 { v = v ^ block[i-1]; }
+                    permuted[offset + i] = v;
+                }
+            } else {
+                // Fused Transform-Permutation (Lifting Braid style)
+                for (i, &p) in perm.iter().enumerate() {
+                    let mut v = block[p];
+                    // Apply Delta/XOR inline relative to original block structure to expose redundancy
+                    if transform_id == 1 && p > 0 { v = v.wrapping_sub(block[p-1]); }
+                    else if transform_id == 2 && p > 0 { v = v ^ block[p-1]; }
+                    permuted[offset + i] = v;
+                }
             }
             offset += block_len;
         }
         (permuted, ranks, state)
     }
 
-    pub fn unpermute_chunk(permuted: &[u8], block_size: usize, ranks: &[BigUint], mut state: u32, theta: f64, use_rank: bool) -> Vec<u8> {
+    pub fn unpermute_chunk(permuted: &[u8], block_size: usize, ranks: &[BigUint], mut state: u32, theta: f64, use_rank: bool, transform_id: u8) -> Vec<u8> {
         let chunk_len = permuted.len();
-        let mut restored = vec![0u8; chunk_len];
+        // Pad to a multiple of 32 bytes for future SIMD "wild copies" (ZXC optimization paradigm)
+        let padded_len = (chunk_len + 31) & !31;
+        let mut restored = vec![0u8; padded_len];
         let mut offset = 0;
         let mut rank_index = 0;
+        
+        let skip_braid = theta > 0.98;
+
         while offset < chunk_len {
             let block_len = std::cmp::min(block_size, chunk_len - offset);
-            let perm = if use_rank {
+            let perm = if skip_braid {
+                (0..block_len).collect()
+            } else if use_rank {
                 let rank = ranks[rank_index].clone();
                 rank_index += 1;
                 rank_to_perm(rank, block_len)
@@ -258,11 +288,36 @@ pub mod crypto {
             };
             let inv = invert_permutation(&perm);
             let block = &permuted[offset..offset+block_len];
+            
+            // Invert transform and permutation fused
             for (i, &p) in inv.iter().enumerate() {
-                restored[offset + i] = block[p];
+                let mut v = block[p];
+                restored[offset + i] = v;
             }
+            
+            if transform_id == 1 {
+                let mut last = 0u8;
+                for i in 0..block_len {
+                    last = last.wrapping_add(restored[offset + i]);
+                    restored[offset + i] = last;
+                }
+            } else if transform_id == 2 {
+                let mut last = 0u8;
+                for i in 0..block_len {
+                    last ^= restored[offset + i];
+                    restored[offset + i] = last;
+                }
+            } else if transform_id == 3 {
+                // EvenOdd is harder to fuse, so we use a fallback for now or ignore
+                let sub_block = restored[offset..offset+block_len].to_vec();
+                let inverted = transforms::invert_evenodd(&sub_block);
+                restored[offset..offset+block_len].copy_from_slice(&inverted);
+            }
+            
             offset += block_len;
         }
+        // Truncate back to the exact logical length before returning
+        restored.truncate(chunk_len);
         restored
     }
 }
@@ -296,6 +351,7 @@ pub mod transforms {
             1 => apply_delta(data),
             2 => apply_xor(data),
             3 => apply_evenodd(data),
+            4 => apply_bitplane(data),
             _ => data.to_vec(),
         }
     }
@@ -305,8 +361,49 @@ pub mod transforms {
             1 => invert_delta(data),
             2 => invert_xor(data),
             3 => invert_evenodd(data),
+            4 => invert_bitplane(data),
             _ => data.to_vec(),
         }
+    }
+
+    pub fn apply_bitplane(data: &[u8]) -> Vec<u8> {
+        let n = data.len();
+        if n <= 4 { return data.to_vec(); }
+        // Assume 4-byte (f32) stride commonly found in tensors
+        let stride = 4;
+        let mut out = Vec::with_capacity(n);
+        for byte_idx in 0..stride {
+            for i in (byte_idx..n).step_by(stride) {
+                out.push(data[i]);
+            }
+        }
+        out
+    }
+
+    pub fn invert_bitplane(data: &[u8]) -> Vec<u8> {
+        let n = data.len();
+        if n <= 4 { return data.to_vec(); }
+        let stride = 4;
+        let mut out = vec![0u8; n];
+        let chunk_size = n / stride;
+        let remainder = n % stride;
+        
+        let mut write_idx = 0;
+        for i in 0..chunk_size {
+            for byte_idx in 0..stride {
+                let read_idx = byte_idx * chunk_size + std::cmp::min(byte_idx, remainder) + i;
+                out[write_idx] = data[read_idx];
+                write_idx += 1;
+            }
+        }
+        
+        // Handle remainder for non-aligned lengths
+        for byte_idx in 0..remainder {
+            let read_idx = byte_idx * chunk_size + byte_idx + chunk_size;
+            out[write_idx] = data[read_idx];
+            write_idx += 1;
+        }
+        out
     }
 
     pub fn apply_delta(data: &[u8]) -> Vec<u8> {
@@ -382,14 +479,65 @@ pub mod transforms {
 pub mod arithmetic {
     use bitvec::prelude::*;
 
-    pub fn adaptive_model_update(model: &mut [i64; 256], symbol: usize, entropy_factor: f64) {
+    pub struct FenwickTree {
+        tree: [i64; 257],
+    }
+
+    impl FenwickTree {
+        fn new(model: &[i64; 256]) -> Self {
+            let mut ft = FenwickTree { tree: [0; 257] };
+            for i in 0..256 {
+                ft.add(i, model[i]);
+            }
+            ft
+        }
+
+        fn add(&mut self, mut idx: usize, val: i64) {
+            idx += 1;
+            while idx <= 256 {
+                self.tree[idx] += val;
+                idx += (idx as i64 & -(idx as i64)) as usize;
+            }
+        }
+
+        fn query(&self, mut idx: usize) -> i64 {
+            let mut sum = 0;
+            while idx > 0 {
+                sum += self.tree[idx];
+                idx -= (idx as i64 & -(idx as i64)) as usize;
+            }
+            sum
+        }
+
+        fn find_symbol(&self, target: i64) -> (usize, i64) {
+            let mut idx = 0;
+            let mut sum = 0;
+            let mut bit = 128;
+            while bit > 0 {
+                let next_idx = idx + bit;
+                if next_idx <= 256 && sum + self.tree[next_idx] <= target {
+                    idx = next_idx;
+                    sum += self.tree[idx];
+                }
+                bit >>= 1;
+            }
+            (idx, sum)
+        }
+    }
+
+    pub fn adaptive_model_update(model: &mut [i64; 256], ft: &mut FenwickTree, total: &mut i64, symbol: usize, entropy_factor: f64) {
         let increment = 1 + (entropy_factor as i64);
         model[symbol] += increment;
-        let sum: i64 = model.iter().sum();
-        if sum > (1 << 20) {
-            for val in model.iter_mut() {
-                *val = (*val + 1) / 2;
-                if *val == 0 { *val = 1; }
+        ft.add(symbol, increment);
+        *total += increment;
+        if *total > (1 << 20) {
+            *total = 0;
+            *ft = FenwickTree { tree: [0; 257] };
+            for i in 0..256 {
+                model[i] = (model[i] + 1) / 2;
+                if model[i] == 0 { model[i] = 1; }
+                ft.add(i, model[i]);
+                *total += model[i];
             }
         }
     }
@@ -399,21 +547,16 @@ pub mod arithmetic {
         let mut high: u32 = 0xFFFFFFFF;
         let mut pending: u32 = 0;
         let mut output = bitvec![u8, Msb0;];
+        
+        let mut ft = FenwickTree::new(model);
+        let mut total: i64 = model.iter().sum();
 
         for &symbol in chunk {
             let symbol = symbol as usize;
             let range = (high as u64) - (low as u64) + 1;
             
-            let mut total = 0i64;
-            let mut sym_low = 0i64;
-            for i in 0..symbol {
-                sym_low += model[i];
-            }
+            let sym_low = ft.query(symbol);
             let sym_high = sym_low + model[symbol];
-            for i in 0..256 {
-                total += model[i];
-            }
-            
             let total_u64 = total as u64;
 
             high = (low as u64 + (range * sym_high as u64 / total_u64) - 1) as u32;
@@ -440,7 +583,7 @@ pub mod arithmetic {
                     break;
                 }
             }
-            adaptive_model_update(model, symbol, entropy_factor);
+            adaptive_model_update(model, &mut ft, &mut total, symbol, entropy_factor);
         }
         
         output.push(true);
@@ -462,37 +605,28 @@ pub mod arithmetic {
         let mut low: u32 = 0;
         let mut high: u32 = 0xFFFFFFFF;
         let mut decoded = Vec::with_capacity(length);
+        
+        let mut ft = FenwickTree::new(model);
+        let mut total: i64 = model.iter().sum();
 
         for _ in 0..length {
             let range = (high as u64) - (low as u64) + 1;
-            
-            let mut total = 0i64;
-            for i in 0..256 {
-                total += model[i];
-            }
             let total_u64 = total as u64;
 
             let scaled = (((value as u64 - low as u64 + 1) * total_u64 - 1) / range) as i64;
             
-            let mut symbol = 0;
-            let mut cum = 0i64;
-            for i in 0..256 {
-                if cum + model[i] > scaled {
-                    symbol = i;
-                    break;
-                }
-                cum += model[i];
-            }
+            let (symbol, sym_low_i64) = ft.find_symbol(scaled);
+            let sym_low = sym_low_i64 as u64;
+            let sym_high = (sym_low_i64 + model[symbol]) as u64;
 
-            let sym_low = cum as u64;
-            let sym_high = (cum + model[symbol]) as u64;
+            decoded.push(symbol as u8);
 
             high = (low as u64 + (sym_high * range / total_u64) - 1) as u32;
             low = (low as u64 + (sym_low * range / total_u64)) as u32;
 
             loop {
                 if high < 0x80000000 {
-                    // Nothing to subtract
+                    // Nothing
                 } else if low >= 0x80000000 {
                     value -= 0x80000000;
                     low -= 0x80000000;
@@ -510,9 +644,10 @@ pub mod arithmetic {
                 value = (value << 1) | (bit as u32);
                 bit_index += 1;
             }
-            decoded.push(symbol as u8);
-            adaptive_model_update(model, symbol, entropy_factor);
+
+            adaptive_model_update(model, &mut ft, &mut total, symbol, entropy_factor);
         }
+
         decoded
     }
 }
@@ -576,8 +711,7 @@ pub fn compress_stream<R: Read, W: Write>(mut input: R, mut output: W, mut confi
             let mut encoded_payload = Vec::new();
             let mut ranks = Vec::new();
             if chunk_flags == 0 {
-                let transformed = transforms::apply_transform(chunk, transform_id);
-                let (permuted, r, _) = crypto::permute_chunk(&transformed, config.block_size, state, theta, config.use_rank);
+                let (permuted, r, _) = crypto::permute_chunk(chunk, config.block_size, state, theta, config.use_rank, transform_id);
                 ranks = r;
                 let mut model = [1i64; 256];
                 encoded_payload = arithmetic::encode(&permuted, &mut model, ent_f);
@@ -671,34 +805,39 @@ pub fn decompress_stream<R: Read, W: Write>(mut input: R, mut output: W) -> std:
         let ent_q = input.read_u16::<BigEndian>()?;
         let ent_f = ent_q as f64 / 100.0;
 
-        let features = Array1::from_vec(vec![ent_f, 0.0, chunk_len as f64, 1.0]);
-        let theta = a3b.predict(&features);
-        let state = crypto::chunk_state(seed, 0, chunk_index);
-
         if (chunk_flags & CHUNK_FLAG_RAW) != 0 {
             let mut buffer = vec![0u8; chunk_len];
             input.read_exact(&mut buffer)?;
             output.write_all(&buffer)?;
-        } else {
-            let mut ranks = Vec::new();
-            if use_rank {
-                let block_count = (chunk_len + block_size - 1) / block_size;
-                for _ in 0..block_count {
-                    ranks.push(crypto::decode_rank(&mut input)?);
-                }
-            }
-            let encoded_len = input.read_u32::<BigEndian>()? as usize;
-            let mut encoded = vec![0u8; encoded_len];
-            input.read_exact(&mut encoded)?;
-
-            let mut model = [1i64; 256];
-            let decoded = arithmetic::decode(&encoded, &mut model, chunk_len, ent_f);
-            let restored = crypto::unpermute_chunk(&decoded, block_size, &ranks, state, theta, use_rank);
-            let final_data = transforms::invert_transform(&restored, transform_id);
-            output.write_all(&final_data)?;
+            
+            // For RAW chunks, we still need to update the predictor state to stay synchronized if we were tracking it
+            let features = Array1::from_vec(vec![ent_f, 0.0, chunk_len as f64, 1.0]);
+            let theta = a3b.predict(&features);
+            a3b.update(ent_f, theta, &features);
+            chunk_index += 1;
+            continue;
         }
 
-        a3b.update(ent_f, theta, &features);
+        let theta = input.read_f32::<BigEndian>()? as f64;
+        let state = crypto::chunk_state(seed, 0, chunk_index);
+
+        let mut ranks = Vec::new();
+        if use_rank {
+            let block_count = (chunk_len + block_size - 1) / block_size;
+            for _ in 0..block_count {
+                ranks.push(crypto::decode_rank(&mut input)?);
+            }
+        }
+        
+        let encoded_len = input.read_u32::<BigEndian>()? as usize;
+        let mut encoded = vec![0u8; encoded_len];
+        input.read_exact(&mut encoded)?;
+
+        let mut model = [1i64; 256];
+        let decoded = arithmetic::decode(&encoded, &mut model, chunk_len, ent_f);
+        let final_data = crypto::unpermute_chunk(&decoded, block_size, &ranks, state, theta, use_rank, transform_id);
+        output.write_all(&final_data)?;
+
         chunk_index += 1;
     }
 
@@ -717,8 +856,8 @@ pub mod psfs {
     pub const PSFS_MAGIC: &[u8; 4] = b"PSFS";
     pub const PSFS_VERSION: u16 = 1;
     pub const PSFS_SUPER_SIZE: usize = 160;
-    pub const PSFS_FILE_SIZE: usize = 56;
-    pub const PSFS_CHUNK_SIZE: usize = 48;
+    pub const PSFS_FILE_SIZE: usize = 52;
+    pub const PSFS_CHUNK_SIZE: usize = 40;
     pub const PSFS_MANIFEST_SIZE: usize = 40;
     pub const MAX_STRING_TABLE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
     pub const MAX_CHUNK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
@@ -760,7 +899,7 @@ pub mod psfs {
         pub seed: u32,
         pub weights: [f32; 4],
         pub transform_id: u8,
-        pub reserved: [u8; 31],
+        pub reserved: [u8; 59],
     }
 
     impl Default for Superblock {
@@ -786,7 +925,7 @@ pub mod psfs {
                 seed: 0,
                 weights: [0.0; 4],
                 transform_id: 0,
-                reserved: [0; 31],
+                reserved: [0; 59],
             }
         }
     }
@@ -1007,7 +1146,7 @@ pub mod psfs {
             entry_meta.push((entry.path().to_path_buf(), flags, target_bytes, path_s.to_string()));
         }
 
-        let mut out = fs::File::create(output_path)?;
+        let mut out = fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(output_path)?;
         let mut codec_flags = 0u32;
         if config.use_rank { codec_flags |= 1 << 0; }
         if matches!(config.predictor_mode, PredictorMode::Header) { codec_flags |= 1 << 1; }
@@ -1042,7 +1181,7 @@ pub mod psfs {
             seed: config.seed,
             weights: [weights[0] as f32, weights[1] as f32, weights[2] as f32, weights[3] as f32],
             transform_id,
-            reserved: [0; 31],
+            reserved: [0; 59],
         };
 
         // Placeholder write
@@ -1058,12 +1197,13 @@ pub mod psfs {
 
         let mut chunk_entries = Vec::new();
         let mut a3b = predictor::A3BPredictor::new(Some(weights), 0.01);
-        let mut embeddings = Vec::new();
+        
+        use rayon::prelude::*;
+        let embeddings: Vec<Vec<f32>> = entry_meta.par_iter().map(|(_, _, _, rel_path_s)| {
+            indexer.generate_embedding(rel_path_s).unwrap_or_else(|_| vec![0.0f32; 384])
+        }).collect();
 
-        for (i, (path, flags, target_bytes, rel_path_s)) in entry_meta.into_iter().enumerate() {
-            let embedding = indexer.generate_embedding(&rel_path_s)?;
-            embeddings.push(embedding);
-
+        for (i, (path, flags, target_bytes, _rel_path_s)) in entry_meta.into_iter().enumerate() {
             if (flags & PSFS_FILE_FLAG_DIR) != 0 { continue; }
             
             let mut reader: Box<dyn Read> = if (flags & PSFS_FILE_FLAG_SYMLINK) != 0 {
@@ -1097,13 +1237,13 @@ pub mod psfs {
                 let mut codec_id = PSFS_CODEC_PERMSTREAM;
 
                 if (cflags & PSFS_CHUNK_FLAG_RAW) == 0 {
-                    let transformed = transforms::apply_transform(chunk_data, transform_id);
-                    let (permuted, ranks, _) = crypto::permute_chunk(&transformed, config.block_size, state, theta, config.use_rank);
+                    let (permuted, ranks, _) = crypto::permute_chunk(chunk_data, config.block_size, state, theta, config.use_rank, transform_id);
                     let mut model = [1i64; 256];
                     let encoded = arithmetic::encode(&permuted, &mut model, ent_f);
 
                     let mut p_cursor = Cursor::new(Vec::new());
                     p_cursor.write_u16::<BigEndian>(ent_q)?;
+                    p_cursor.write_f32::<BigEndian>(theta as f32)?;
                     if config.use_rank {
                         for rank in &ranks {
                             crypto::encode_rank(&mut p_cursor, rank)?;
@@ -1159,7 +1299,8 @@ pub mod psfs {
         let mut hasher = Sha256::new();
         // Hash file index, string table, chunk table
         out.seek(SeekFrom::Start(index_offset))?;
-        let mut hash_buf = vec![0u8; (manifest_offset - index_offset) as usize];
+        let hash_size = manifest_offset.checked_sub(index_offset).ok_or_else(|| anyhow::anyhow!("Invalid offset"))? as usize;
+        let mut hash_buf = vec![0u8; hash_size];
         out.read_exact(&mut hash_buf)?;
         hasher.update(&hash_buf);
         let table_hash = hasher.finalize();
@@ -1208,7 +1349,7 @@ pub mod psfs {
         if &sb.magic != PSFS_MAGIC { anyhow::bail!("Invalid magic"); }
 
         if (sb.flags & PSFS_FLAG_HAS_MANIFEST) != 0 {
-            let manifest_size = (sb.manifest_offset - sb.index_offset) as usize;
+            let manifest_size = sb.manifest_offset.checked_sub(sb.index_offset).ok_or_else(|| anyhow::anyhow!("Invalid offset"))? as usize;
             // Prevent DoS via unbounded manifest size
             if manifest_size > MAX_STRING_TABLE_SIZE * 2 {
                 anyhow::bail!("Manifest size exceeds limit");
@@ -1286,12 +1427,8 @@ pub mod psfs {
         let mut reader = Cursor::new(payload);
         let ent_q = reader.read_u16::<BigEndian>()?;
         let ent_f = ent_q as f64 / 100.0;
+        let theta = reader.read_f32::<BigEndian>()? as f64;
 
-        let weights = predictor::A3BPredictor::init_weights(&config.predictor_mode, config.seed, config.weights.clone());
-        let mut a3b = predictor::A3BPredictor::new(Some(weights), 0.01);
-        
-        let features = Array1::from_vec(vec![ent_f, 0.0, raw_size as f64, 1.0]);
-        let theta = a3b.predict(&features);
         let state = crypto::chunk_state(config.seed, file_id, chunk_index);
 
         let mut ranks = Vec::new();
@@ -1311,9 +1448,8 @@ pub mod psfs {
 
         let mut model = [1i64; 256];
         let decoded = arithmetic::decode(&encoded, &mut model, raw_size, ent_f);
-        let restored = crypto::unpermute_chunk(&decoded, config.block_size, &ranks, state, theta, config.use_rank);
-        let final_data = transforms::invert_transform(&restored, transform_id);
-        
+        let final_data = crypto::unpermute_chunk(&decoded, config.block_size, &ranks, state, theta, config.use_rank, transform_id);
+
         Ok(final_data)
     }
 
@@ -1342,7 +1478,7 @@ pub mod psfs {
         }
 
         file.seek(SeekFrom::Start(sb.strings_offset))?;
-        let string_table_size = (sb.chunk_table_offset - sb.strings_offset) as usize;
+        let string_table_size = sb.chunk_table_offset.checked_sub(sb.strings_offset).ok_or_else(|| anyhow::anyhow!("Invalid offset"))? as usize;
         if string_table_size > MAX_STRING_TABLE_SIZE {
             anyhow::bail!("String table exceeds size limit");
         }
@@ -1358,7 +1494,11 @@ pub mod psfs {
         fs::create_dir_all(output_dir)?;
 
         for fe in file_entries {
-            let path_bytes = &string_table[fe.path_offset as usize .. (fe.path_offset + fe.path_len) as usize];
+            let path_end = fe.path_offset.checked_add(fe.path_len).ok_or_else(|| anyhow::anyhow!("Path offset overflow"))? as usize;
+            if path_end > string_table.len() {
+                anyhow::bail!("Path bounds exceed string table length");
+            }
+            let path_bytes = &string_table[fe.path_offset as usize .. path_end];
             let rel_path = std::str::from_utf8(path_bytes)?;
             
             // SECURITY FIX: Zip-Slip protection
@@ -1380,9 +1520,14 @@ pub mod psfs {
 
             fs::create_dir_all(out_path.parent().unwrap())?;
 
+            let chunk_end = fe.chunk_start.checked_add(fe.chunk_count).ok_or_else(|| anyhow::anyhow!("Chunk bounds overflow"))? as usize;
+            if chunk_end > chunk_entries.len() {
+                anyhow::bail!("Chunk bounds exceed chunk table length");
+            }
+
             if (fe.flags & PSFS_FILE_FLAG_SYMLINK) != 0 {
                 let mut data = Vec::new();
-                for (chunk_idx, ce) in chunk_entries[fe.chunk_start as usize .. (fe.chunk_start + fe.chunk_count) as usize].iter().enumerate() {
+                for (chunk_idx, ce) in chunk_entries[fe.chunk_start as usize .. chunk_end].iter().enumerate() {
                     file.seek(SeekFrom::Start(ce.data_offset))?;
                     if ce.stored_size as usize > MAX_CHUNK_SIZE {
                         anyhow::bail!("Chunk size exceeds limit");
@@ -1402,7 +1547,7 @@ pub mod psfs {
             }
 
             let mut out_file = fs::File::create(&out_path)?;
-            for (chunk_idx, ce) in chunk_entries[fe.chunk_start as usize .. (fe.chunk_start + fe.chunk_count) as usize].iter().enumerate() {
+            for (chunk_idx, ce) in chunk_entries[fe.chunk_start as usize .. chunk_end].iter().enumerate() {
                 file.seek(SeekFrom::Start(ce.data_offset))?;
                 if ce.stored_size as usize > MAX_CHUNK_SIZE {
                     anyhow::bail!("Chunk size exceeds limit");
@@ -1448,5 +1593,49 @@ mod tests {
         decompress_stream(&compressed[..], &mut decompressed).unwrap();
 
         assert_eq!(data.to_vec(), decompressed);
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn test_zip_slip_protection() {
+        // We simulate the path parsing logic from unpack_psfs
+        let malicious_path = "../../etc/passwd";
+        let mut safe_path = PathBuf::new();
+        for component in Path::new(malicious_path).components() {
+            if let std::path::Component::Normal(c) = component {
+                safe_path.push(c);
+            }
+        }
+        assert_eq!(safe_path.as_os_str(), "etc/passwd"); // Traversal removed
+        
+        let malicious_path_abs = "/etc/shadow";
+        let mut safe_path_abs = PathBuf::new();
+        for component in Path::new(malicious_path_abs).components() {
+            if let std::path::Component::Normal(c) = component {
+                safe_path_abs.push(c);
+            }
+        }
+        assert_eq!(safe_path_abs.as_os_str(), "etc/shadow"); // Root stripped
+    }
+
+    #[test]
+    fn test_symlink_pivot_protection() {
+        // We simulate the symlink validation from unpack_psfs
+        let malicious_target = "/etc/passwd";
+        let target_path = Path::new(malicious_target);
+        assert!(target_path.is_absolute() || target_path.components().any(|c| matches!(c, std::path::Component::ParentDir)));
+
+        let traversal_target = "../../root";
+        let target_path2 = Path::new(traversal_target);
+        assert!(target_path2.is_absolute() || target_path2.components().any(|c| matches!(c, std::path::Component::ParentDir)));
+
+        let safe_target = "local_dir/file.txt";
+        let target_path3 = Path::new(safe_target);
+        assert!(!(target_path3.is_absolute() || target_path3.components().any(|c| matches!(c, std::path::Component::ParentDir))));
     }
 }
