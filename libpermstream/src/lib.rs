@@ -484,7 +484,7 @@ pub mod arithmetic {
     }
 
     impl FenwickTree {
-        fn new(model: &[i64; 256]) -> Self {
+        pub fn new(model: &[i64; 256]) -> Self {
             let mut ft = FenwickTree { tree: [0; 257] };
             for i in 0..256 {
                 ft.add(i, model[i]);
@@ -492,7 +492,7 @@ pub mod arithmetic {
             ft
         }
 
-        fn add(&mut self, mut idx: usize, val: i64) {
+        pub fn add(&mut self, mut idx: usize, val: i64) {
             idx += 1;
             while idx <= 256 {
                 self.tree[idx] += val;
@@ -500,7 +500,7 @@ pub mod arithmetic {
             }
         }
 
-        fn query(&self, mut idx: usize) -> i64 {
+        pub fn query(&self, mut idx: usize) -> i64 {
             let mut sum = 0;
             while idx > 0 {
                 sum += self.tree[idx];
@@ -509,7 +509,7 @@ pub mod arithmetic {
             sum
         }
 
-        fn find_symbol(&self, target: i64) -> (usize, i64) {
+        pub fn find_symbol(&self, target: i64) -> (usize, i64) {
             let mut idx = 0;
             let mut sum = 0;
             let mut bit = 128;
@@ -1639,3 +1639,5 @@ mod security_tests {
         assert!(!(target_path3.is_absolute() || target_path3.components().any(|c| matches!(c, std::path::Component::ParentDir))));
     }
 }
+mod arithmetic_test;
+mod transform_test;
