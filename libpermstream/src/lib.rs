@@ -289,10 +289,35 @@ pub mod crypto {
             let inv = invert_permutation(&perm);
             let block = &permuted[offset..offset+block_len];
             
-            // Invert transform and permutation fused
-            for (i, &p) in inv.iter().enumerate() {
-                let mut v = block[p];
-                restored[offset + i] = v;
+            // SIMD-Friendly Fast Path (Unrolled for Auto-Vectorization)
+            // We use fixed 8-byte chunks to encourage LLVM to emit NEON/AVX shuffle instructions
+            let mut i = 0;
+            while i + 8 <= block_len {
+                let p0 = inv[i];
+                let p1 = inv[i+1];
+                let p2 = inv[i+2];
+                let p3 = inv[i+3];
+                let p4 = inv[i+4];
+                let p5 = inv[i+5];
+                let p6 = inv[i+6];
+                let p7 = inv[i+7];
+                
+                restored[offset + i] = block[p0];
+                restored[offset + i + 1] = block[p1];
+                restored[offset + i + 2] = block[p2];
+                restored[offset + i + 3] = block[p3];
+                restored[offset + i + 4] = block[p4];
+                restored[offset + i + 5] = block[p5];
+                restored[offset + i + 6] = block[p6];
+                restored[offset + i + 7] = block[p7];
+                
+                i += 8;
+            }
+            
+            // Remainder loop
+            while i < block_len {
+                restored[offset + i] = block[inv[i]];
+                i += 1;
             }
             
             if transform_id == 1 {

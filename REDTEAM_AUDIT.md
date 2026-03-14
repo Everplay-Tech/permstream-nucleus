@@ -38,6 +38,15 @@ Research from the "ZipNN" library (2025) highlighted that standard compression f
 - **Validation:** Added the `test_bitplane_transform` unit test to verify perfect cyclic inversion.
 - **Receipt:** The `cargo test` confirms the math is strictly lossless. During empirical testing with mock floating-point generators, the high entropy of the synthetic mantissas correctly triggered the engine's new **Dynamic Bypass** (which skips the heavy Braid logic when `theta > 0.98`), proving the engine's internal heuristics successfully isolate and handle noise.
 
+## 4. Scalar Loop Unrolling & SIMD Cache-Awareness
+### Hypothesis
+The original CPU decompression path processed permutations via a pure scalar loop `restored[offset + i] = block[p]`, with an inline Transform evaluation `if transform_id == 1 { v = v.wrapping_sub(...) }` injected right into the middle of the byte shuffle. Research (FSST-GPU, Iguana 2025) shows that this forces Von Neumann cache thrashing and completely breaks LLVM auto-vectorization. 
+
+### Implementation Audit
+- **Code:** Refactored the `crypto::unpermute_chunk` function to completely separate the shuffle pass from the transform pass.
+- **Validation:** Implemented an explicit 8-byte unrolled chunk loop (`let p0 = inv[i]; let p1 = inv[i+1]; ...`) designed to provide LLVM with fixed-width constants to generate NEON `vqtbl` or AVX `vpshufb` intrinsics automatically. 
+- **Receipt (Empirical Benchmark):** Running `cargo test test_stream_roundtrip` confirms lossless roundtripping. Running the Silesia benchmark verifies that separating the transform logic from the permutation logic does not regress performance, establishing the structural groundwork required for future direct `std::arch` intrinsic injections without breaking transformations.
+
 ## Future Auditing Modality
 To ensure future iterations of PermStream (e.g., adding AVX-512 vector intrinsics or transitioning to a multi-table context Coder) can be immediately audited, the following framework has been established:
 
