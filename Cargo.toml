@@ -1,6 +1,13 @@
 [workspace]
 members = [
-    "libpermstream",
+    "libpermstream", "nucleus-writer",
     "psfsd",
 ]
 resolver = "2"
+
+[profile.release]
+strip = true          # Automatically strip symbols from the binary.
+opt-level = "z"       # Optimize for size.
+lto = true            # Enable Link Time Optimization.
+codegen-units = 1     # Maximize size reduction/optimization (slower compilation).
+panic = "abort"       # Abort on panic to remove panic formatting overhead.

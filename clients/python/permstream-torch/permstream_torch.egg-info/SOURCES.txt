@@ -1,0 +1,10 @@
+setup.py
+permstream_torch/__init__.py
+permstream_torch/dataloader.py
+permstream_torch/permstream_pb2.py
+permstream_torch/permstream_pb2_grpc.py
+permstream_torch.egg-info/PKG-INFO
+permstream_torch.egg-info/SOURCES.txt
+permstream_torch.egg-info/dependency_links.txt
+permstream_torch.egg-info/requires.txt
+permstream_torch.egg-info/top_level.txt
