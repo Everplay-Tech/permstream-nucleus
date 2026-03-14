@@ -199,26 +199,45 @@ mod mcp_server {
     impl PsfsMcpServer {
         #[tool(description = "Query zero-pause telemetry stats directly from the Fenwick Tree model without decompression.")]
         async fn query_hft_telemetry(&self, #[tool(aggr)] params: TelemetryParams) -> Result<String, String> {
-            // Fictional demonstration: In a real system, we'd open the .psfs chunk
-            // and pass the raw compressed payload to TelemetryEngine.
-            // Here we instantiate the engine and query the mock data.
-            let _container = resolve_safe_path(&params.container_path)
+            let container = resolve_safe_path(&params.container_path)
                 .map_err(|e| e.to_string())?;
 
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || -> Result<String, String> {
                 let mut engine = libpermstream::telemetry::TelemetryEngine::new();
-                let mock_payload = vec![0x01, 0x02, 0x03, 0x04];
-                if engine.ingest_compressed_chunk(&mock_payload).is_ok() {
+                
+                use std::io::{Read, Seek, SeekFrom};
+                let mut file = std::fs::File::open(&container).map_err(|e| e.to_string())?;
+                let sb = psfs::Superblock::read(&mut file).map_err(|e| e.to_string())?;
+                
+                if sb.chunk_count == 0 {
+                    return Ok("Container is empty.".to_string());
+                }
+
+                // Read the first chunk entry
+                file.seek(SeekFrom::Start(sb.chunk_table_offset)).map_err(|e| e.to_string())?;
+                let ce = psfs::ChunkEntry::read(&mut file).map_err(|e| e.to_string())?;
+
+                if ce.codec_id == psfs::PSFS_CODEC_RAW {
+                    return Ok("Chunk is raw, no telemetry state to analyze.".to_string());
+                }
+
+                file.seek(SeekFrom::Start(ce.data_offset)).map_err(|e| e.to_string())?;
+                let mut payload = vec![0u8; ce.stored_size as usize];
+                file.read_exact(&mut payload).map_err(|e| e.to_string())?;
+
+                let use_rank = (sb.codec_flags & (1 << 0)) != 0;
+
+                if engine.ingest_compressed_chunk(&payload, ce.raw_size as usize, use_rank, sb.block_size as usize).is_ok() {
                     let sum = engine.query_prefix_sum(params.max_latency_ms);
                     let freq = engine.estimate_frequency(params.max_latency_ms);
                     Ok(format!(
-                        "O(log N) Searchable Compression Results:\n- Prefix sum (events <= {}ms): {}\n- Estimated frequency of {}ms events: {:.4}",
+                        "O(log N) Searchable Compression Results for chunk 0:\n- Prefix sum (events <= {}ms): {}\n- Estimated frequency of {}ms events: {:.4}",
                         params.max_latency_ms, sum, params.max_latency_ms, freq
                     ))
                 } else {
                     Ok("Failed to ingest compressed chunk".to_string())
                 }
-            }).await.unwrap_or_else(|e| Ok(format!("Executor error: {}", e)))
+            }).await.unwrap_or_else(|e| Err(format!("Executor error: {}", e)))
         }
 
         #[tool(description = "List all files in a PSFS container")]

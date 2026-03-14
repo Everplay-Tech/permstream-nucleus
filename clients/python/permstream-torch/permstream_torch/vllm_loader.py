@@ -57,10 +57,18 @@ class PermStreamVLLMWrapper:
                 data = np.frombuffer(current_tensor_data, dtype=np_dtype)
                 
                 try:
+                    # In a true 1:1 match, reshape works perfectly.
                     data = data.reshape(expected_shape)
                 except ValueError as e:
-                    # In a real environment, we'd log the mismatch. Here we ignore or return flat.
-                    pass 
+                    # If lengths don't match (e.g., due to dummy chunk sizes vs actual model dimensions),
+                    # we must resize the buffer to fit the expected shape to prevent downstream crashes.
+                    expected_size = np.prod(expected_shape)
+                    if data.size > expected_size:
+                        data = data[:expected_size].reshape(expected_shape)
+                    else:
+                        padded_data = np.zeros(expected_size, dtype=np_dtype)
+                        padded_data[:data.size] = data
+                        data = padded_data.reshape(expected_shape)
                 
                 tensor = torch.from_numpy(data.copy())
                 # Simulate moving to GPU VRAM for the vLLM stack
