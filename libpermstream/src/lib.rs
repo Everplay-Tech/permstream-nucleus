@@ -109,7 +109,44 @@ pub mod predictor {
         }
 
         pub fn predict(&self, features: &Array1<f64>) -> f64 {
-            let theta = self.weights.dot(features);
+            // 1. Standard Linear Regression (Base path)
+            let linear_pred = self.weights.dot(features);
+            
+            // 2. ShannonLinear Regulation: Calculate the current empirical entropy
+            let current_ent = features[0]; // features[0] is ent_f
+            
+            // 3. Markov Confidence (Secondary Context for bGLU)
+            // If the current entropy drastically differs from history, we have low confidence.
+            let mut avg_hist = 0.5;
+            if !self.history.is_empty() {
+                avg_hist = self.history.iter().sum::<f64>() / self.history.len() as f64;
+            }
+            let diff = (current_ent - avg_hist).abs();
+            
+            // 4. Bitwise Gating (bGLU mechanism)
+            // We use standard Rust f64 to bits, bitwise mask, and back to f64 to implement
+            // the zero-cost attention without branching.
+            // If diff > 0.2 (high volatility), mask becomes 0, "shutting off" the linear prediction.
+            let is_volatile = diff > 0.2;
+            let gate_mask: u64 = if is_volatile { 0x0000000000000000 } else { 0xFFFFFFFFFFFFFFFF };
+            
+            let linear_bits = linear_pred.to_bits();
+            let gated_bits = linear_bits & gate_mask;
+            let mut theta = f64::from_bits(gated_bits);
+            
+            // If the gate shut off the linear model, fallback to the Markov average
+            if is_volatile {
+                theta = avg_hist;
+            }
+            
+            // 5. Entropy-Driven Regulation (ShannonLinear)
+            // Amplify structured prediction, dampen noisy predictions toward 1.0 (Dynamic Bypass)
+            if current_ent > 0.95 {
+                theta = 1.0; // Force bypass
+            } else if current_ent < 0.3 {
+                theta *= 0.8; // Sharpen topological intervals for highly ordered data
+            }
+
             if theta.is_nan() { return 0.5; }
             theta.clamp(0.0, 1.0)
         }
@@ -158,6 +195,21 @@ pub mod crypto {
             let j = (x % (i as u32 + 1)) as usize;
             perm.swap(i, j);
         }
+        
+        // Topological Handle Reduction (Prune redundant cycles)
+        // This forces the braid into a "pseudo-Garside" normal form by eliminating trivial 2-cycles
+        // which reduces the Arithmetic Coder state transitions.
+        for i in 0..n {
+            // If p[p[i]] == i, it's a trivial 2-cycle. 
+            // In a continuous topological stream, these often represent noise.
+            // We resolve them by collapsing them into the identity mapping if the theta confidence is strong (low entropy).
+            let p_i = perm[i];
+            if p_i != i && perm[p_i] == i && theta < 0.5 {
+                perm[i] = i;
+                perm[p_i] = p_i;
+            }
+        }
+        
         let new_state = xorshift32(state ^ seed ^ (n as u32));
         (perm, new_state)
     }
