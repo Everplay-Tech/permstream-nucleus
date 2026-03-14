@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "libpermstream", "nucleus-writer",
-    "psfsd",
+    "psfsd", "integrations/tracing-permstream"
 ]
 resolver = "2"
 
