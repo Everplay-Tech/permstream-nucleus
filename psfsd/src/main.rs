@@ -685,13 +685,25 @@ mod data_node {
 
                         match decoded_data {
                             Ok(data) => {
-                                let response = TensorResponse {
-                                    tensor_data: data,
-                                    shape: vec![-1],
-                                    dtype: "uint8".to_string(),
-                                };
-                                if tx.send(Ok(response)).await.is_err() {
-                                    return;
+                                // Slice the data into 16KB chunks to respect macOS loopback MTU
+                                // and prevent the TSO/recvspace EMSGSIZE bug under high concurrency.
+                                let chunk_size = 16 * 1024;
+                                let mut chunks = data.chunks(chunk_size).peekable();
+                                
+                                while let Some(fragment) = chunks.next() {
+                                    let is_last = chunks.peek().is_none() && i == chunk_count - 1;
+                                    
+                                    let response = TensorResponse {
+                                        tensor_data: fragment.to_vec(),
+                                        shape: vec![-1], // We could send the real shape if we parse headers, but raw bytes is fine
+                                        dtype: "uint8".to_string(),
+                                        is_last_chunk: is_last,
+                                        file_index: file_id,
+                                    };
+                                    
+                                    if tx.send(Ok(response)).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                             Err(e) => {

@@ -26,4 +26,6 @@ message TensorResponse {
   bytes tensor_data = 1;
   repeated int64 shape = 2;
   string dtype = 3;
+  bool is_last_chunk = 4;
+  uint32 file_index = 5;
 }

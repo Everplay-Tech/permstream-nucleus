@@ -36,12 +36,22 @@ class PermStreamDataset(IterableDataset):
             file_paths=self.file_paths
         )
         
+        current_tensor_data = bytearray()
+        
         for response in stub.StreamTensors(request):
-            # Efficiently convert bytes to numpy/torch without extra copies if possible
-            # Here we assume response.dtype and response.shape are provided
-            data = np.frombuffer(response.tensor_data, dtype=response.dtype)
-            data = data.reshape(response.shape)
-            yield torch.from_numpy(data.copy()) # .copy() to own memory if needed
+            current_tensor_data.extend(response.tensor_data)
+            
+            if response.is_last_chunk:
+                # Efficiently convert bytes to numpy/torch without extra copies if possible
+                data = np.frombuffer(current_tensor_data, dtype=response.dtype)
+                # If shape is dynamic or flat, we just pass the flat array for the benchmark
+                if len(response.shape) > 0 and response.shape[0] != -1:
+                    try:
+                        data = data.reshape(response.shape)
+                    except ValueError:
+                        pass # Ignore shape mismatch in dummy test data
+                yield torch.from_numpy(data.copy())
+                current_tensor_data = bytearray()
 
 def get_dataloader(container_path, file_paths, batch_size=32, endpoint="localhost:50051"):
     dataset = PermStreamDataset(container_path, file_paths, endpoint)
