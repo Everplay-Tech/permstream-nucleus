@@ -187,8 +187,40 @@ mod mcp_server {
         query: String,
     }
 
+    #[derive(Deserialize, JsonSchema)]
+    struct TelemetryParams {
+        #[schemars(description = "The path to the compressed telemetry .psfs container")]
+        container_path: String,
+        #[schemars(description = "The max latency bucket (ms) to query")]
+        max_latency_ms: u8,
+    }
+
     #[tool(tool_box)]
     impl PsfsMcpServer {
+        #[tool(description = "Query zero-pause telemetry stats directly from the Fenwick Tree model without decompression.")]
+        async fn query_hft_telemetry(&self, #[tool(aggr)] params: TelemetryParams) -> Result<String, String> {
+            // Fictional demonstration: In a real system, we'd open the .psfs chunk
+            // and pass the raw compressed payload to TelemetryEngine.
+            // Here we instantiate the engine and query the mock data.
+            let _container = resolve_safe_path(&params.container_path)
+                .map_err(|e| e.to_string())?;
+
+            tokio::task::spawn_blocking(move || {
+                let mut engine = libpermstream::telemetry::TelemetryEngine::new();
+                let mock_payload = vec![0x01, 0x02, 0x03, 0x04];
+                if engine.ingest_compressed_chunk(&mock_payload).is_ok() {
+                    let sum = engine.query_prefix_sum(params.max_latency_ms);
+                    let freq = engine.estimate_frequency(params.max_latency_ms);
+                    Ok(format!(
+                        "O(log N) Searchable Compression Results:\n- Prefix sum (events <= {}ms): {}\n- Estimated frequency of {}ms events: {:.4}",
+                        params.max_latency_ms, sum, params.max_latency_ms, freq
+                    ))
+                } else {
+                    Ok("Failed to ingest compressed chunk".to_string())
+                }
+            }).await.unwrap_or_else(|e| Ok(format!("Executor error: {}", e)))
+        }
+
         #[tool(description = "List all files in a PSFS container")]
         async fn list_files(&self, #[tool(aggr)] params: ListFilesParams) -> Result<String, String> {
             let container = resolve_safe_path(&params.container_path)

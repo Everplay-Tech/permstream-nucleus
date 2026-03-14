@@ -76,6 +76,7 @@ pub fn get_transform_name(id: u8) -> String {
 
 pub mod gpu;
 pub mod rag;
+pub mod telemetry;
 
 pub mod predictor {
     use super::*;
