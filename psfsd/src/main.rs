@@ -343,14 +343,31 @@ mod data_node {
     use ndarray::Array1;
     use libpermstream::{gpu, crypto};
     use std::sync::Arc;
+    use dashmap::DashMap;
+    use tokio::sync::broadcast;
 
     pub mod permstream {
         tonic::include_proto!("permstream");
     }
 
+    type CoalescingResult = Result<Vec<u8>, Status>;
+
     #[derive(Clone)]
     pub struct PsfsDataNode {
         pub gpu: Option<Arc<gpu::GpuContext>>,
+        // Maps a "container_path:file_id:chunk_index" key to a broadcast channel
+        // to coalesce multiple requests for the same chunk into a single I/O operation.
+        pub inflight_requests: Arc<DashMap<String, broadcast::Sender<CoalescingResult>>>,
+    }
+
+    impl Default for PsfsDataNode {
+        fn default() -> Self {
+            let gpu = gpu::GpuContext::new().ok().map(Arc::new);
+            Self {
+                gpu,
+                inflight_requests: Arc::new(DashMap::new()),
+            }
+        }
     }
 
     impl std::fmt::Debug for PsfsDataNode {
@@ -358,13 +375,6 @@ mod data_node {
             f.debug_struct("PsfsDataNode")
                 .field("gpu_enabled", &self.gpu.is_some())
                 .finish()
-        }
-    }
-
-    impl Default for PsfsDataNode {
-        fn default() -> Self {
-            let gpu_ctx = gpu::GpuContext::new().ok().map(Arc::new);
-            Self { gpu: gpu_ctx }
         }
     }
 
@@ -557,13 +567,66 @@ mod data_node {
             let req = request.into_inner();
             let container_path = resolve_safe_path(&req.container_path)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            
-            match self.read_chunk(&container_path, req.file_id, req.chunk_index).await {
-                Ok(data) => Ok(Response::new(ChunkResponse { data })),
+
+            let cache_key = format!("{}:{}:{}", req.container_path, req.file_id, req.chunk_index);
+
+            // Fast path: Check if there's already an inflight request
+            let mut rx = {
+                if let Some(sender) = self.inflight_requests.get(&cache_key) {
+                    Some(sender.subscribe())
+                } else {
+                    None
+                }
+            };
+
+            // If we found an existing channel, await its broadcast
+            if let Some(mut rx) = rx {
+                return match rx.recv().await {
+                    Ok(Ok(data)) => Ok(Response::new(ChunkResponse { data })),
+                    Ok(Err(status)) => Err(status),
+                    Err(_) => Err(Status::internal("Coalesced request failed or sender dropped")),
+                };
+            }
+
+            // We are the first to request this chunk. Create a channel.
+            // Capacity of 1 is enough since we only broadcast the final result once.
+            let (tx, _) = broadcast::channel::<CoalescingResult>(1);
+
+            // Re-check and insert to handle race conditions where another thread inserted between our check and here.
+            {
+                let entry = self.inflight_requests.entry(cache_key.clone()).or_insert_with(|| tx.clone());
+                // If the entry we got back isn't our tx, someone else beat us to it.
+                if !entry.value().same_channel(&tx) {
+                    rx = Some(entry.subscribe());
+                }
+            }
+
+            // If someone beat us in the race, await their channel
+            if let Some(mut rx) = rx {
+                return match rx.recv().await {
+                    Ok(Ok(data)) => Ok(Response::new(ChunkResponse { data })),
+                    Ok(Err(status)) => Err(status),
+                    Err(_) => Err(Status::internal("Coalesced request failed or sender dropped")),
+                };
+            }
+
+            // Perform the actual work
+            let result = match self.read_chunk(&container_path, req.file_id, req.chunk_index).await {
+                Ok(data) => Ok(data),
                 Err(e) => Err(Status::internal(format!("Failed to read chunk: {}", e))),
+            };
+
+            // Broadcast the result to any workers that arrived while we were processing
+            let _ = tx.send(result.clone());
+
+            // Remove the key so future requests will re-read (unless an external caching layer handles it)
+            self.inflight_requests.remove(&cache_key);
+
+            match result {
+                Ok(data) => Ok(Response::new(ChunkResponse { data })),
+                Err(e) => Err(e),
             }
         }
-
         type StreamTensorsStream = ReceiverStream<Result<TensorResponse, Status>>;
 
         async fn stream_tensors(&self, request: Request<TensorRequest>) -> Result<Response<Self::StreamTensorsStream>, Status> {
@@ -651,7 +714,9 @@ mod data_node {
         println!("PermStream Data Node listening on {}", addr);
 
         Server::builder()
-            .add_service(PermStreamDataNodeServer::new(service))
+            .add_service(PermStreamDataNodeServer::new(service)
+                .max_decoding_message_size(64 * 1024 * 1024)
+                .max_encoding_message_size(64 * 1024 * 1024))
             .serve(addr)
             .await?;
 
@@ -659,7 +724,8 @@ mod data_node {
     }
 }
 
-#[tokio::main]
+// Configure the runtime for High-Concurrency / Neighbor-Aware execution
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 

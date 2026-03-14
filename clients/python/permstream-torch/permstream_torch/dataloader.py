@@ -22,7 +22,13 @@ class PermStreamDataset(IterableDataset):
         if pb2_grpc is None:
             raise ImportError("Please generate gRPC code using protoc")
             
-        channel = grpc.insecure_channel(self.endpoint)
+        # Increase message size limits to 64MB
+        MAX_MESSAGE_LENGTH = 64 * 1024 * 1024
+        options = [
+            ('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
+            ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH),
+        ]
+        channel = grpc.insecure_channel(self.endpoint, options=options)
         stub = pb2_grpc.PermStreamDataNodeStub(channel)
         
         request = pb2.TensorRequest(
