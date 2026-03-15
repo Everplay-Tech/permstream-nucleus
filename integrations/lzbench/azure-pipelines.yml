@@ -1,0 +1,352 @@
+pr:
+  branches:
+    include:
+    - '*'
+  paths:
+    exclude:
+    - doc
+
+trigger:
+  branches:
+    include:
+    - '*'
+  paths:
+    exclude:
+    - doc
+
+jobs:
+- job:
+  timeoutInMinutes: 240
+  pool:
+    vmImage: $(imageName)
+
+  variables:
+    USE_CCACHE: 1
+    CCACHE_DIR: $(Pipeline.Workspace)/ccache
+    CCACHE_COMPRESS: 1
+    CCACHE_COMPRESSLEVEL: 9
+    CCACHE_CPP2: 1
+    CCACHE_MAXSIZE: 2G
+    OS_NAME: $(Agent.OS)
+    PARENT_BRANCH: 1.8
+
+  strategy:
+    matrix:
+      clang [macOS 14]:
+        imageName: 'macOS-14'
+        SELECTED_CC: clang
+        SELECTED_CXX: clang++
+
+      # clang-6 and newer compilers
+      clang-20 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-20 main'
+        SELECTED_CC: clang-20
+        SELECTED_CXX: clang++-20
+        PACKAGES: 'clang-20 llvm-20-dev libomp-20-dev'
+
+      clang-19 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-19 main'
+        SELECTED_CC: clang-19
+        SELECTED_CXX: clang++-19
+        PACKAGES: 'clang-19 llvm-19-dev libomp-19-dev'
+
+      clang-18 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-18 main'
+        SELECTED_CC: clang-18
+        SELECTED_CXX: clang++-18
+        PACKAGES: 'clang-18 llvm-18-dev libomp-18-dev'
+
+      clang-17 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-17 main'
+        SELECTED_CC: clang-17
+        SELECTED_CXX: clang++-17
+        PACKAGES: 'clang-17 llvm-17-dev libomp-17-dev'
+
+      clang-16 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-16 main'
+        SELECTED_CC: clang-16
+        SELECTED_CXX: clang++-16
+        PACKAGES: 'clang-16 llvm-16-dev libomp-16-dev'
+
+      clang-15 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-15 main'
+        SELECTED_CC: clang-15
+        SELECTED_CXX: clang++-15
+        PACKAGES: 'clang-15 llvm-15-dev libomp-15-dev'
+
+      clang-14 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-14 main'
+        SELECTED_CC: clang-14
+        SELECTED_CXX: clang++-14
+        PACKAGES: 'clang-14 llvm-14-dev libomp-14-dev'
+
+      clang-13 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-13 main'
+        SELECTED_CC: clang-13
+        SELECTED_CXX: clang++-13
+        PACKAGES: 'clang-13 llvm-13-dev libomp-13-dev'
+
+      clang-12 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        UBUNTU_CODE_NAME: jammy
+        SOURCE_LINE: 'deb https://apt.llvm.org/$(UBUNTU_CODE_NAME)/ llvm-toolchain-$(UBUNTU_CODE_NAME)-12 main'
+        SELECTED_CC: clang-12
+        SELECTED_CXX: clang++-12
+        PACKAGES: 'clang-12 llvm-12-dev libomp-12-dev'
+
+
+      # gcc-9 and newer compilers
+      gcc-14 x86 64-bit [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: gcc-14
+        SELECTED_CXX: g++-14
+        PACKAGES: 'g++-14'
+
+      gcc-14 x86 32-bit [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: gcc-14
+        SELECTED_CXX: g++-14
+        PACKAGES: 'g++-14 g++-14-multilib gcc-multilib'
+        MORE_OPTIONS: 'BUILD_ARCH=32-bit'
+
+      gcc-13 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        SELECTED_CC: gcc-13
+        SELECTED_CXX: g++-13
+        PACKAGES: 'g++-13'
+
+      gcc-12 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        SELECTED_CC: gcc-12
+        SELECTED_CXX: g++-12
+        PACKAGES: 'g++-12'
+
+      gcc-11 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        SELECTED_CC: gcc-11
+        SELECTED_CXX: g++-11
+        PACKAGES: 'g++-11'
+
+      gcc-10 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        SELECTED_CC: gcc-10
+        SELECTED_CXX: g++-10
+        PACKAGES: 'g++-10'
+
+      gcc-9 [Ubuntu 22.04 Jammy]:
+        imageName: 'ubuntu-22.04'
+        SELECTED_CC: gcc-9
+        SELECTED_CXX: g++-9
+        PACKAGES: 'g++-9'
+
+      gcc ARM 64-bit [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: aarch64-linux-gnu-gcc
+        SELECTED_CXX: aarch64-linux-gnu-g++
+        PACKAGES: 'qemu-system-arm qemu-user-static gcc-aarch64-linux-gnu g++-aarch64-linux-gnu'
+        MORE_OPTIONS: 'BUILD_STATIC=1'
+        QEMU_INTERPRETER: 'qemu-aarch64-static -L /usr/aarch64-linux-gnu'
+
+      gcc ARM 32-bit [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: arm-linux-gnueabi-gcc
+        SELECTED_CXX: arm-linux-gnueabi-g++
+        PACKAGES: 'qemu-system-arm qemu-user-static gcc-arm-linux-gnueabi g++-arm-linux-gnueabi'
+        MORE_OPTIONS: 'BUILD_STATIC=1'
+        QEMU_INTERPRETER: 'qemu-arm-static -L /usr/arm-linux-gnueabi'
+
+      gcc PowerPC 64-bit Little-endian (powerpc64le) [Ubuntu 24.04 Noble]:
+        imageName: 'ubuntu-24.04'
+        SELECTED_CC: powerpc64le-linux-gnu-gcc
+        SELECTED_CXX: powerpc64le-linux-gnu-g++
+        PACKAGES: 'qemu-system-ppc64le qemu-user-static gcc-powerpc64le-linux-gnu g++-powerpc64le-linux-gnu'
+        MORE_OPTIONS: 'BUILD_STATIC=1'
+        QEMU_INTERPRETER: 'qemu-ppc64le-static -L /usr/powerpc64le-linux-gnu'
+
+
+  steps:
+  - script: |
+      uname -r
+      df -Th
+      ls -l ..
+      pwd
+      ls -l
+
+      echo SELECTED_CC=$SELECTED_CC SELECTED_CXX=$SELECTED_CXX imageName=$(imageName) OS_NAME=$OS_NAME SOURCE_LINE=$SOURCE_LINE
+      echo --- Configure required LLVM and Ubuntu Toolchain repositories
+      if [[ "$SOURCE_LINE" != "" ]]; then
+        curl -sSL "http://apt.llvm.org/llvm-snapshot.gpg.key" | sudo -E apt-key add -
+        echo "$SOURCE_LINE" | sudo tee -a /etc/apt/sources.list > /dev/null
+      fi
+
+      echo --- Update list of packages and download dependencies
+      if [[ "$OS_NAME" == "Linux" ]]; then
+        sudo -E apt-add-repository -y "ppa:ubuntu-toolchain-r/test"
+        sudo -E apt-get -yq update >> ~/apt-get-update.log 2>&1
+
+        echo Instaling PACKAGES=$PACKAGES
+        PACKAGES="$(eval echo $PACKAGES)"
+
+        if [[ "$(Compiler)" == "clang" ]]; then
+          sudo apt purge -y 'libomp*'
+        fi
+
+        echo Instaling PACKAGES=$PACKAGES
+        sudo -E apt-get -yq --no-install-suggests --no-install-recommends --allow-unauthenticated install $PACKAGES ccache
+
+        if [[ "$(Compiler)" == "clang" ]]; then
+          REAL_COMPILER_VER=`$SELECTED_CC --version | grep -o "clang version.*" | awk '{print $3}'`
+        else
+          REAL_COMPILER_VER=`$SELECTED_CC --version | head -1 | awk '{print $4}'`
+        fi
+      else
+         REAL_COMPILER_VER=`$SELECTED_CC --version | grep -o "clang version.*" | awk '{print $3}'`
+         brew update
+         brew install ccache libomp
+      fi
+
+      UPDATE_TIME=$SECONDS
+      echo --- Packages updated in $UPDATE_TIME seconds.
+
+      echo "##vso[task.setvariable variable=REAL_COMPILER_VER]${REAL_COMPILER_VER%%-*}"
+      echo "##vso[task.setvariable variable=UPDATE_TIME]$UPDATE_TIME"
+
+    displayName: '*** Install Build Dependencies'
+
+  - task: Cache@2
+    continueOnError: true
+    inputs:
+      key: '"ccache"| "$(PARENT_BRANCH)" | "$(imageName)-$(Compiler)-$(REAL_COMPILER_VER)" | "$(Build.SourceVersion)"'
+      restoreKeys: '"ccache" | "$(PARENT_BRANCH)" | "$(imageName)-$(Compiler)-$(REAL_COMPILER_VER)"'
+      path: $(CCACHE_DIR)
+    displayName: '*** Download/upload ccached files'
+
+  - checkout: self
+    fetchDepth: 32
+
+  - script: |
+      df -Th
+      git submodule sync
+      git submodule update --init --force --depth=256
+      git submodule
+    displayName: '*** Update git submodules'
+
+  - script: |
+      echo "SELECTED_CC=$SELECTED_CC (`which $SELECTED_CC`) SELECTED_CXX=$SELECTED_CXX (`which $SELECTED_CXX`) REAL_COMPILER_VER=$REAL_COMPILER_VER"
+      $SELECTED_CC -v
+      $SELECTED_CXX -v
+      ccache --version
+      ccache -p
+      ccache --zero-stats
+      df -Th
+      if [[ "$OS_NAME" == "Linux" ]]; then
+        cat /proc/cpuinfo
+      fi
+    displayName: '*** System and compiler info'
+
+  - script: |
+      echo SELECTED_CC=$SELECTED_CC SELECTED_CXX=$SELECTED_CXX REAL_COMPILER_VER=$REAL_COMPILER_VER imageName=$(imageName) OS_NAME=$OS_NAME
+      df -Th
+
+      make -j2 CC="ccache $SELECTED_CC" CXX="ccache $SELECTED_CXX" $MORE_OPTIONS || exit 1
+      ccache --show-stats
+      echo -------------------------------------
+      file ./lzbench
+      $QEMU_INTERPRETER ./lzbench
+
+      df -Th
+      BUILD_TIME=$SECONDS
+      echo --- Build took $BUILD_TIME seconds. Packages updated in $UPDATE_TIME seconds.
+
+      echo '##vso[task.setvariable variable=BUILD_TIME]'$BUILD_TIME
+
+    displayName: '*** Build'
+
+  - script: |
+      $QEMU_INTERPRETER ./lzbench -eall ./lzbench || exit 1
+
+      RUN_TIME=$SECONDS
+      echo --- Total time $(($RUN_TIME + $UPDATE_TIME + $BUILD_TIME)) seconds. Run time $RUN_TIME seconds. Build took $BUILD_TIME seconds. Packages updated in $UPDATE_TIME seconds.
+      df -Th
+      rm -rf *
+      df -Th
+
+    displayName: '*** Run'
+
+
+- job:
+  pool:
+    vmImage: 'windows-latest'
+
+  strategy:
+    matrix:
+      mingw32-gcc 15.1.0 x86 32-bit (POSIX threads) [Windows]:
+        toolchain: 'mingw32'
+        arch: '32-bit'
+        SELECTED_CC: gcc
+        SELECTED_CXX: g++
+        MORE_OPTIONS: ""
+        ARCHIVE: https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/i686-15.1.0-release-posix-dwarf-ucrt-rt_v12-rev0.7z
+      mingw32-gcc 15.1.0 x86 32-bit (Windows threads) [Windows]:
+        toolchain: 'mingw32'
+        arch: '32-bit'
+        SELECTED_CC: gcc
+        SELECTED_CXX: g++
+        MORE_OPTIONS: ""
+        ARCHIVE: https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/i686-15.1.0-release-win32-dwarf-ucrt-rt_v12-rev0.7z
+
+      mingw64-gcc 15.1.0 x86 64-bit (POSIX threads) [Windows]:
+        toolchain: 'mingw64'
+        arch: '64-bit'
+        SELECTED_CC: gcc
+        SELECTED_CXX: g++
+        MORE_OPTIONS: ""
+        ARCHIVE: https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-posix-seh-ucrt-rt_v12-rev0.7z
+      mingw64-gcc 15.1.0 x86 64-bit (Windows threads) [Windows]:
+        toolchain: 'mingw64'
+        arch: '64-bit'
+        SELECTED_CC: gcc
+        SELECTED_CXX: g++
+        MORE_OPTIONS: ""
+        ARCHIVE: https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-win32-seh-ucrt-rt_v12-rev0.7z
+
+  steps:
+  - powershell: |
+      Invoke-WebRequest -Uri '$(ARCHIVE)' -OutFile '$(Build.ArtifactStagingDirectory)\mingw.7z'
+    displayName: 'Download MinGW'
+
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.ArtifactStagingDirectory)\mingw.7z'
+      destinationFolder: '$(Build.SourcesDirectory)\mingw'
+
+  - script: |
+      echo Building with $(toolchain) for $(arch) architecture
+      set PATH=$(Build.SourcesDirectory)\mingw\$(toolchain)\bin;%PATH%
+      where $(SELECTED_CC)
+      $(SELECTED_CXX) --version
+      mingw32-make -j2 CC=$(SELECTED_CC) CXX=$(SELECTED_CXX) $(MORE_OPTIONS) || exit 1
+      file lzbench.exe
+      lzbench.exe
+    displayName: 'Build with $(toolchain)'
+
+  - script: |
+      echo Running a build for $(toolchain) for $(arch) architecture
+      lzbench.exe -eall lzbench.exe || exit 1
+    displayName: 'Run for $(arch) architecture'

@@ -1,0 +1,42 @@
+# Directories
+_codelite/
+_visual/
+.vscode/
+
+# Rust-based Density
+misc/density/src/target/
+misc/density/src/Cargo.lock
+
+# Archives
+*.zip
+
+# Object files
+*.o
+*.ko
+
+# Libraries
+*.lib
+*.a
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Visual solution files
+*.suo
+*.user
+
+# Linux
+lzbench
+
+# backups, old versions
+*~
+
+todo.txt
