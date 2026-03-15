@@ -74,6 +74,7 @@ pub fn get_transform_name(id: u8) -> String {
     }
 }
 
+pub mod ffi;
 pub mod gpu;
 pub mod rag;
 pub mod telemetry;
@@ -242,9 +243,10 @@ pub mod crypto {
         let mut perm = vec![0; n];
         for k in (0..n).rev() {
             let fact = &facts[k];
-            let idx = (&rank / fact).to_usize().unwrap();
+            let idx = (&rank / fact).to_usize().unwrap_or(0);
+            let safe_idx = if idx < remaining.len() { idx } else { 0 };
             rank %= fact;
-            perm[n - 1 - k] = remaining.remove(idx);
+            perm[n - 1 - k] = remaining.remove(safe_idx);
         }
         perm
     }

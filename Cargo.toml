@@ -3,6 +3,9 @@ members = [
     "libpermstream", "nucleus-writer",
     "psfsd", "integrations/tracing-permstream"
 ]
+exclude = [
+    "integrations/lzbench/misc/density/src"
+]
 resolver = "2"
 
 [profile.release]
