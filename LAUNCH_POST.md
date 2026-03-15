@@ -1,3 +1,4 @@
+
 # Show HN: PermStream Nucleus: 11x Throughput vs Scalar Loops with LZ4-Beating Compression Ratios
 
 *Tested on 85GB Mixed DB Telemetry (Postgres/Elasticsearch) on AMD EPYC 9004; PermStream achieved 1.94 GB/s per-core throughput.*  

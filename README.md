@@ -21,6 +21,23 @@ PermStream Nucleus is the high-performance Rust evolution of the PermStream Pro 
 *   **Zero-VRAM Divergence**: PermStream directly unpermutes data aligned to GPU memory controller thread-mappings, eliminating PCIe swapping bottlenecks during DeepSeek-V3 class inference.
 *   **Bit-Plane Separation**: ZipNN-inspired transform that isolates structured exponents from noisy mantissas in neural network weights.
 
+## 🔄 **Watermark-Driven Compaction**
+PermStream supports efficient, stateful journaling via `psfs_compact.py`. Using the `--watermark` flag, you can perform incremental compactions that only process records added since the last pass.
+```bash
+python3 psfs_compact.py input.psfs output.psfs \
+    --journal archive.psfj \
+    --watermark .compaction_state \
+    --truncate-journal
+```
+This is essential for high-frequency telemetry where the journal grows rapidly, allowing for sub-second cleanup of the log stream.
+
+## 🔌 **Strategic Integrations (2026 Trojan Horse)**
+PermStream provides drop-in integrations for major data infrastructure bottlenecks:
+*   **[Rust Tracing](./integrations/tracing-permstream)**: Real-time compression layer for async structured logging.
+*   **[PyTorch DataLoader](./integrations/pytorch-permstream)**: LibTorch C++ extension for line-rate tensor loading into VRAM.
+*   **[Apache Arrow](./integrations/arrow-permstream)**: Custom `ScalarFunction` for zero-copy query execution.
+*   **[vLLM DePIN](./clients/python/permstream-torch)**: Accelerated weight loader for DeepSeek-V3 class MoE models.
+
 ## 🚀 **Quick Start (Rust Daemon)**
 
 ```bash
