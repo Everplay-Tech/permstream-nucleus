@@ -15,11 +15,11 @@ PermStream Nucleus is the high-performance Rust evolution of the PermStream Pro 
 | **Mozilla (Code)** | 3.8s | **2.22s** | **1.7x FASTER** |
 | **XML Data** | 1.5s | **0.23s** | **6.5x FASTER** |
 
-## 🎯 **Core Innovations (Neural Data Engine Paradigm)**
-*   **A3B Predictor (Relocatable)**: AI entropy forecasting moved to the encoding phase, allowing the decoder to run at pure memory bandwidth speeds.
-*   **O(N) Fenwick Tree Coder**: A Binary Indexed Tree frequency model that reduces cumulative probability lookups from $O(256)$ to $O(8)$ per symbol.
-*   **GPU SRAM Tiling**: WGSL shaders that unweave Braid permutations entirely within GPU L1 cache (Shared Memory), eliminating VRAM warp divergence.
-*   **Bit-Plane Separation**: ZipNN-inspired transform that isolates structured exponents from noisy mantissas in neural network weights (FP32/BFloat16).
+## 🎯 **The Mathematical Moat (2026 Core Innovations)**
+*   **Braid Group Topology**: Treats bit-planes as strands in a topological configuration space. Using $O(N)$ Hecke representation algorithms, it captures structural entropy in neural weights (MoE FP8/BF16) that standard sliding-window compressors (Zstd/LZ4) treat as incompressible noise.
+*   **O(log N) Fenwick Tree Coder**: A Binary Indexed Tree frequency model that reduces cumulative probability lookups from $O(256)$ to $O(8)$ per symbol. It allows real-time probability adaptation at the bit-level, crucial for HFT telemetry and Agentic AI context switching.
+*   **Zero-VRAM Divergence**: PermStream directly unpermutes data aligned to GPU memory controller thread-mappings, eliminating PCIe swapping bottlenecks during DeepSeek-V3 class inference.
+*   **Bit-Plane Separation**: ZipNN-inspired transform that isolates structured exponents from noisy mantissas in neural network weights.
 
 ## 🚀 **Quick Start (Rust Daemon)**
 
